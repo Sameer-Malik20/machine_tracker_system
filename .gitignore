@@ -39,3 +39,18 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local osquery runtime files
+/local_osquery.db/
+/local_osquery.db
+/local_osquery.pid
+
+# employee configuration file (contains private user info)
+/employee.json
+
+# local testing configurations and secrets
+/local_enroll_secret
+/local_osquery.conf
+/local_osquery.flags
+/settings.json
+/dribbble_design.png
