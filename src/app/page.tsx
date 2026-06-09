@@ -63,7 +63,8 @@ export default function DashboardPage() {
   const [inspectingNodeKey, setInspectingNodeKey] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"logs" | "processes" | "hardware" | "network" | "activity" | "timeline">("processes");
+  const [activeTab, setActiveTab] = useState<"logs" | "processes" | "network" | "activity" | "timeline" | "history">("processes");
+  const [subTab, setSubTab] = useState<"windows" | "browser">("windows");
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     if (typeof window !== "undefined") {
       const savedTheme = localStorage.getItem("wfh-theme") as "dark" | "light" | null;
@@ -1983,10 +1984,10 @@ export default function DashboardPage() {
                     Running Processes
                   </button>
                   <button
-                    className={`tab-btn ${activeTab === "hardware" ? "tab-active" : ""}`}
-                    onClick={() => setActiveTab("hardware")}
+                    className={`tab-btn ${activeTab === "history" ? "tab-active" : ""}`}
+                    onClick={() => setActiveTab("history")}
                   >
-                    Hardware Specs
+                    🌐 Browser & Windows
                   </button>
                   <button
                     className={`tab-btn ${activeTab === "network" ? "tab-active" : ""}`}
@@ -2055,32 +2056,212 @@ export default function DashboardPage() {
                     </div>
                   )}
 
-                  {/* TAB 2: Hardware specs */}
-                  {activeTab === "hardware" && (
+                  {/* TAB 2: Browser & Windows */}
+                  {activeTab === "history" && (
                     <div>
-                      <div className="detail-section-label">Real Machine Hardware Configuration</div>
-                      {inspectingHost.latestResults?.["system_performance"] ? (
-                        <div className="detail-panel" style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                          {inspectingHost.latestResults["system_performance"].map((spec, idx) => (
-                            <div key={idx} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                              <div className="sidebar-info-row">
-                                <span className="sidebar-label">CPU Processor Model</span>
-                                <span className="sidebar-value">{spec.cpu_brand || "Intel/AMD Brand"}</span>
+                      {/* Sub-tab Switcher */}
+                      <div className="tab-group" style={{ background: "var(--bg-input)", marginBottom: "16px", maxWidth: "450px" }}>
+                        <button
+                          className={`tab-btn ${subTab === "windows" ? "tab-active" : ""}`}
+                          onClick={() => setSubTab("windows")}
+                        >
+                          🖥️ Active Windows (Incognito & Normal)
+                        </button>
+                        <button
+                          className={`tab-btn ${subTab === "browser" ? "tab-active" : ""}`}
+                          onClick={() => setSubTab("browser")}
+                        >
+                          🌐 Browser History Database
+                        </button>
+                      </div>
+
+                      {subTab === "windows" && (
+                        <div>
+                          <div className="detail-section-label">Active App Window Logs (Incognito & Normal Mode Tracker)</div>
+                          {(() => {
+                            const rawEvents = inspectingHost.latestResults?.["window_history"] || [];
+
+                            if (rawEvents.length === 0) {
+                              return (
+                                <div className="selection-pane-empty" style={{ padding: "40px" }}>
+                                  <span className="empty-icon">🖥️</span>
+                                  No active window logs recorded yet.
+                                </div>
+                              );
+                            }
+
+                            // Parse events
+                            const parsedEvents = rawEvents.map((item) => {
+                              const details = item.details || "";
+                              const firstPipe = details.indexOf("|");
+                              const process = firstPipe > -1 ? details.substring(0, firstPipe) : details;
+                              const title = firstPipe > -1 ? details.substring(firstPipe + 1) : "";
+                              return {
+                                timestamp: item.timestamp,
+                                process,
+                                title
+                              };
+                            });
+
+                            // Sort ascending to calculate duration
+                            const sortedAsc = [...parsedEvents].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+                            // Calculate duration
+                            const eventsWithDuration = sortedAsc.map((event, idx) => {
+                              let durationSec = 0;
+                              if (idx < sortedAsc.length - 1) {
+                                const currentMs = new Date(event.timestamp).getTime();
+                                const nextMs = new Date(sortedAsc[idx + 1].timestamp).getTime();
+                                durationSec = Math.max(0, Math.round((nextMs - currentMs) / 1000));
+                              } else {
+                                const currentMs = new Date(event.timestamp).getTime();
+                                const referenceMs = new Date(inspectingHost.lastHeartbeat).getTime();
+                                durationSec = Math.max(0, Math.round((referenceMs - currentMs) / 1000));
+                              }
+                              return { ...event, durationSec };
+                            });
+
+                            // Sort back to descending for display
+                            const displayEvents = [...eventsWithDuration].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+                            const formatDuration = (secs: number) => {
+                              if (secs <= 0) return "< 2s";
+                              if (secs < 60) return `${secs}s`;
+                              const mins = Math.floor(secs / 60);
+                              const remSecs = secs % 60;
+                              if (mins < 60) return `${mins}m ${remSecs}s`;
+                              const hours = Math.floor(mins / 60);
+                              const remMins = mins % 60;
+                              return `${hours}h ${remMins}m`;
+                            };
+
+                            const formatTimeLocal = (tsStr: string) => {
+                              try {
+                                const date = new Date(tsStr);
+                                if (isNaN(date.getTime())) return "N/A";
+                                return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                              } catch (e) {
+                                return "N/A";
+                              }
+                            };
+
+                            return (
+                              <div className="table-wrapper" style={{ maxHeight: "300px", overflowY: "auto" }}>
+                                <table className="hosts-table" style={{ fontSize: "0.78rem" }}>
+                                  <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
+                                    <tr>
+                                      <th>Time</th>
+                                      <th>Application</th>
+                                      <th>Window Title</th>
+                                      <th>Duration</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {displayEvents.map((item, idx) => (
+                                      <tr key={idx}>
+                                        <td style={{ whiteSpace: "nowrap", color: "var(--text-secondary)" }}>
+                                          {formatTimeLocal(item.timestamp)}
+                                        </td>
+                                        <td>
+                                          <span className="status-badge status-active" style={{ fontSize: "0.65rem", padding: "2px 8px", background: "var(--accent-muted)", color: "var(--accent-text)", border: "1px solid var(--border-focus)" }}>
+                                            {item.process}
+                                          </span>
+                                        </td>
+                                        <td style={{ fontWeight: 600, color: "var(--text-primary)", maxWidth: "300px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.title}>
+                                          {item.title || "Untitled Window"}
+                                        </td>
+                                        <td style={{ whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontWeight: 600 }}>
+                                          {formatDuration(item.durationSec)}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
                               </div>
-                              <div className="sidebar-info-row">
-                                <span className="sidebar-label">Total Installed Physical RAM</span>
-                                <span className="sidebar-value">
-                                  {spec.physical_memory ? `${Math.round(parseInt(spec.physical_memory, 10) / (1024 * 1024 * 1024))} GB` : "N/A"}
-                                </span>
-                              </div>
-                              {/* Free Available Memory removed by admin request */}
-                            </div>
-                          ))}
+                            );
+                          })()}
                         </div>
-                      ) : (
-                        <div className="selection-pane-empty" style={{ padding: "40px" }}>
-                          <span className="empty-icon">⚙️</span>
-                          Awaiting hardware specs log payload... (Run test simulation agent to send logs)
+                      )}
+
+                      {subTab === "browser" && (
+                        <div>
+                          <div className="detail-section-label">Recent Browser History (Chrome & Edge Copies)</div>
+                          {(() => {
+                            const chromeHist = inspectingHost.latestResults?.["chrome_history"] || [];
+                            const edgeHist = inspectingHost.latestResults?.["edge_history"] || [];
+                            
+                            // Combine history and sort by last_visit_time descending
+                            const combinedHist = ([
+                              ...chromeHist.map(h => ({ ...h, browser: "Chrome" })),
+                              ...edgeHist.map(h => ({ ...h, browser: "Edge" }))
+                            ] as Record<string, string>[]).sort((a, b) => {
+                              const timeA = parseInt(a.last_visit_time || "0", 10);
+                              const timeB = parseInt(b.last_visit_time || "0", 10);
+                              return timeB - timeA;
+                            });
+
+                            if (combinedHist.length === 0) {
+                              return (
+                                <div className="selection-pane-empty" style={{ padding: "40px" }}>
+                                  <span className="empty-icon">🌐</span>
+                                  No browser history recorded yet.
+                                </div>
+                              );
+                            }
+
+                            // Helper to format Chrome/Edge Windows/WebKit microsecond timestamp
+                            const formatChromeTime = (tsStr: string) => {
+                              try {
+                                const ts = parseInt(tsStr, 10);
+                                if (!ts || ts === 0) return "N/A";
+                                // Convert to milliseconds, subtract offset
+                                const ms = Math.floor(ts / 1000 - 11644473600000);
+                                const date = new Date(ms);
+                                // Check if valid date
+                                if (isNaN(date.getTime())) return "N/A";
+                                return date.toLocaleString();
+                              } catch (e) {
+                                return "N/A";
+                              }
+                            };
+
+                            return (
+                              <div className="table-wrapper" style={{ maxHeight: "300px", overflowY: "auto" }}>
+                                <table className="hosts-table" style={{ fontSize: "0.78rem" }}>
+                                  <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
+                                    <tr>
+                                      <th>Browser</th>
+                                      <th>Title</th>
+                                      <th>URL</th>
+                                      <th>Visit Time</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {combinedHist.map((item, idx) => (
+                                      <tr key={idx}>
+                                        <td>
+                                          <span className={`status-badge ${item.browser === "Chrome" ? "status-active" : "status-idle"}`} style={{ fontSize: "0.65rem", padding: "2px 8px" }}>
+                                            {item.browser}
+                                          </span>
+                                        </td>
+                                        <td style={{ fontWeight: 600, color: "var(--text-primary)", maxWidth: "250px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.title}>
+                                          {item.title || "Untitled"}
+                                        </td>
+                                        <td style={{ maxWidth: "300px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.url}>
+                                          <a href={item.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent-text)", textDecoration: "underline" }}>
+                                            {item.url}
+                                          </a>
+                                        </td>
+                                        <td style={{ whiteSpace: "nowrap" }}>
+                                          {formatChromeTime(item.last_visit_time)}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
                     </div>
@@ -2090,6 +2271,37 @@ export default function DashboardPage() {
                   {activeTab === "network" && (
                     <div>
                       <div className="detail-section-label">Real Listening Network Socket connections</div>
+
+                      {/* Hardware Specs Row */}
+                      {inspectingHost.latestResults?.["system_performance"] && (
+                        <div style={{
+                          display: "flex",
+                          gap: "16px",
+                          marginBottom: "16px",
+                          padding: "12px 16px",
+                          background: "var(--bg-input)",
+                          borderRadius: "var(--radius-md)",
+                          border: "1px solid var(--border-light)",
+                          fontSize: "0.82rem"
+                        }}>
+                          {inspectingHost.latestResults["system_performance"].map((spec, idx) => (
+                            <div key={idx} style={{ display: "flex", gap: "16px", alignItems: "center", width: "100%" }}>
+                              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                                <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>💻 CPU:</span>
+                                <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>{spec.cpu_brand || "Intel/AMD"}</span>
+                              </div>
+                              <div style={{ width: "1px", height: "14px", background: "var(--border-medium)" }} />
+                              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                                <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>🧠 RAM:</span>
+                                <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+                                  {spec.physical_memory ? `${Math.round(parseInt(spec.physical_memory, 10) / (1024 * 1024 * 1024))} GB` : "N/A"}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
                       {inspectingHost.latestResults?.["active_network_sockets"] ? (
                         <div className="table-wrapper" style={{ maxHeight: "300px", overflowY: "auto" }}>
                           <table className="hosts-table" style={{ fontSize: "0.78rem" }}>

@@ -83,7 +83,7 @@ export class ActivityTracker {
       status: "Active",
       recentQueries: [],
       latestResults: {},
-      statusHistory: this.generateSeededHistory()
+      statusHistory: []
     };
     this.updateStatus(newState, "Active");
 
@@ -115,7 +115,7 @@ export class ActivityTracker {
         status: "Active",
         recentQueries: [],
         latestResults: {},
-        statusHistory: this.generateSeededHistory()
+        statusHistory: []
       };
       this.updateStatus(state, "Active");
     } else {
@@ -162,12 +162,6 @@ export class ActivityTracker {
     const deltaSeconds = Math.floor((now.getTime() - state.lastHeartbeat.getTime()) / 1000);
     state.lastLogIntervalDeltaSeconds = deltaSeconds;
     state.lastHeartbeat = now;
-
-    if (deltaSeconds > this.MAX_EXPECTED_LOG_INTERVAL) {
-      this.updateStatus(state, "Idle");
-    } else {
-      this.updateStatus(state, "Active");
-    }
 
     // Group logs by query name
     const groupedLogs: Record<string, typeof logs> = {};
@@ -239,6 +233,18 @@ export class ActivityTracker {
       state.recentQueries = state.recentQueries.slice(0, 10);
     }
 
+    // Determine status from both heartbeat delta and actual keyboard/mouse activity logs
+    const userActivity = state.latestResults?.["user_activity"];
+    const activeStatus = userActivity?.find(r => r.name === "ActiveStatus")?.data;
+
+    if (deltaSeconds > this.MAX_EXPECTED_LOG_INTERVAL) {
+      this.updateStatus(state, "Idle");
+    } else if (activeStatus === "Idle") {
+      this.updateStatus(state, "Idle");
+    } else {
+      this.updateStatus(state, "Active");
+    }
+
     activityRegistry.set(nodeKey, state);
     return state;
   }
@@ -259,7 +265,7 @@ export class ActivityTracker {
         lastLogIntervalDeltaSeconds: 0,
         status: "Active",
         recentQueries: [],
-        statusHistory: this.generateSeededHistory()
+        statusHistory: []
       };
       this.updateStatus(state, "Active");
     }
@@ -296,10 +302,14 @@ export class ActivityTracker {
 
     for (const node of list) {
       const secondsSinceLastHeartbeat = Math.floor((now.getTime() - node.lastHeartbeat.getTime()) / 1000);
+      const userActivity = node.latestResults?.["user_activity"];
+      const activeStatus = userActivity?.find(r => r.name === "ActiveStatus")?.data;
       
       if (secondsSinceLastHeartbeat > this.OFFLINE_THRESHOLD) {
         this.updateStatus(node, "Offline");
       } else if (secondsSinceLastHeartbeat > this.MAX_EXPECTED_LOG_INTERVAL) {
+        this.updateStatus(node, "Idle");
+      } else if (activeStatus === "Idle") {
         this.updateStatus(node, "Idle");
       } else {
         this.updateStatus(node, "Active");
