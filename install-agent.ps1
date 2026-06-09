@@ -136,12 +136,19 @@ $MonitorScript = @'
 $CsharpCode = '
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 namespace Win32 {
     public class Win32Input {
         [DllImport("user32.dll")]
         public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
         [DllImport("kernel32.dll")]
         public static extern uint GetTickCount();
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
         [StructLayout(LayoutKind.Sequential)]
         public struct LASTINPUTINFO {
             public uint cbSize;
@@ -166,11 +173,34 @@ function Get-UserIdleTime {
     return 0
 }
 
+function Get-ActiveWindow {
+    $hwnd = [Win32.Win32Input]::GetForegroundWindow()
+    if ($hwnd -ne [IntPtr]::Zero) {
+        $pid = 0
+        [Win32.Win32Input]::GetWindowThreadProcessId($hwnd, [ref]$pid) | Out-Null
+        $sb = New-Object System.Text.StringBuilder 512
+        [Win32.Win32Input]::GetWindowText($hwnd, $sb, $sb.Capacity) | Out-Null
+        $title = $sb.ToString()
+        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        $name = if ($proc) { $proc.ProcessName } else { "Unknown" }
+        return @{ Process = $name; Title = $title }
+    }
+    return $null
+}
+
 $regPath = "HKCU:\Software\Monetra\Activity"
+$historyPath = "HKCU:\Software\Monetra\Activity\WindowHistory"
 if (-not (Test-Path $regPath)) {
     New-Item -Path "HKCU:\Software" -Name "Monetra" -Force | Out-Null
     New-Item -Path "HKCU:\Software\Monetra" -Name "Activity" -Force | Out-Null
 }
+if (-not (Test-Path $historyPath)) {
+    New-Item -Path $regPath -Name "WindowHistory" -Force | Out-Null
+}
+
+$loopCount = 0
+$lastProc = ""
+$lastTitle = ""
 
 while ($true) {
     try {
@@ -195,6 +225,46 @@ while ($true) {
         Set-ItemProperty -Path $regPath -Name "EmployeeID"     -Value $empId     -Force | Out-Null
         Set-ItemProperty -Path $regPath -Name "EmployeeEmail"  -Value $empEmail  -Force | Out-Null
         Set-ItemProperty -Path $regPath -Name "Department"     -Value $dept      -Force | Out-Null
+
+        # Track active window changes
+        $activeWin = Get-ActiveWindow
+        if ($activeWin -and ($activeWin.Process -ne $lastProc -or $activeWin.Title -ne $lastTitle)) {
+            $lastProc = $activeWin.Process
+            $lastTitle = $activeWin.Title
+            
+            $ts = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            $val = "$($activeWin.Process)|$($activeWin.Title)"
+            if ($val.Length -gt 512) {
+                $val = $val.Substring(0, 512)
+            }
+            
+            Set-ItemProperty -Path $historyPath -Name $ts -Value $val -Force | Out-Null
+            
+            # Prune WindowHistory to only keep last 50 entries
+            $items = Get-Item -Path $historyPath
+            $properties = $items.GetValueNames() | Sort-Object
+            if ($properties.Count -gt 50) {
+                $toDeleteCount = $properties.Count - 50
+                for ($i = 0; $i -lt $toDeleteCount; $i++) {
+                    Remove-ItemProperty -Path $historyPath -Name $properties[$i] -Force | Out-Null
+                }
+            }
+        }
+
+        # Copy browser history files every 60 seconds (30 loops * 2s sleep)
+        if ($loopCount % 30 -eq 0) {
+            $userName = [System.Environment]::UserName
+            $chromeHistory = "C:\Users\$userName\AppData\Local\Google\Chrome\User Data\Default\History"
+            $edgeHistory = "C:\Users\$userName\AppData\Local\Microsoft\Edge\User Data\Default\History"
+            
+            if (Test-Path $chromeHistory) {
+                [System.IO.File]::Copy($chromeHistory, "C:\ProgramData\osquery\chrome_history.db", $true)
+            }
+            if (Test-Path $edgeHistory) {
+                [System.IO.File]::Copy($edgeHistory, "C:\ProgramData\osquery\edge_history.db", $true)
+            }
+        }
+        $loopCount++
     } catch {}
     Start-Sleep -Seconds 2
 }
