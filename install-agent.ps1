@@ -2,13 +2,13 @@
 # Susalabs WFH Tracker - Complete Agent Installer
 # install-agent.ps1
 #
-# Yeh script ek baar run karo (as Administrator).
-# Yeh automatically:
-#   1. Osquery config files banata hai
-#   2. Employee.json check karta hai
-#   3. Activity monitor script install karta hai
-#   4. Windows Task Scheduler mein register karta hai (auto-start on login)
-#   5. Osquery Windows Service configure karta hai (auto-start on boot)
+# Run this script as Administrator.
+# This script will automatically:
+#   1. Create osquery config files
+#   2. Create employee.json configuration
+#   3. Install activity monitor script
+#   4. Register in Windows Task Scheduler (auto-start on login)
+#   5. Configure Osquery Windows Service (auto-start on boot)
 # ==============================================================================
 
 param(
@@ -19,49 +19,49 @@ param(
     [string]$Department    = ""
 )
 
-# ── Admin Check ────────────────────────────────────────────────────────────────
+# --- Admin Check ---
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator
 )
 if (-not $isAdmin) {
     Write-Host ""
-    Write-Host "  ❌ ERROR: Please run this script as Administrator." -ForegroundColor Red
-    Write-Host "  Right-click PowerShell → 'Run as administrator'" -ForegroundColor Yellow
+    Write-Host "  [ERROR] Please run this script as Administrator." -ForegroundColor Red
+    Write-Host "  Right-click PowerShell -> 'Run as administrator'" -ForegroundColor Yellow
     Write-Host ""
     Read-Host "Press Enter to exit"
     Exit 1
 }
 
 Write-Host ""
-Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║    Susalabs WFH Tracker - Agent Installer v1.0      ║" -ForegroundColor Cyan
-Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "  ======================================================" -ForegroundColor Cyan
+Write-Host "       Susalabs WFH Tracker - Agent Installer v1.0      " -ForegroundColor Cyan
+Write-Host "  ======================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ── Step 1: Server Address ────────────────────────────────────────────────────
+# --- Step 1: Server Address ---
 if (-not $ServerAddress) {
     Write-Host "  [STEP 1/5] Server Configuration" -ForegroundColor Yellow
     Write-Host "  Enter the Susalabs WFH Tracker server address." -ForegroundColor White
-    Write-Host "  Example: 192.168.1.100:3001  OR  yourserver.com:3001" -ForegroundColor Gray
+    Write-Host "  Example: yourserver.com  OR  192.168.1.100:3001" -ForegroundColor Gray
     Write-Host "  (Press Enter to use default: localhost:3001)" -ForegroundColor Gray
     $ServerAddress = Read-Host "  Server Address"
     if (-not $ServerAddress) { $ServerAddress = "localhost:3001" }
 }
-Write-Host "  ✓ Server: $ServerAddress" -ForegroundColor Green
+Write-Host "  + Server: $ServerAddress" -ForegroundColor Green
 
-# ── Step 2: Employee Info ──────────────────────────────────────────────────────
+# --- Step 2: Employee Info ---
 Write-Host ""
 Write-Host "  [STEP 2/5] Employee Information" -ForegroundColor Yellow
-Write-Host "  Yeh information dashboard par dikhegi." -ForegroundColor White
+Write-Host "  This information will be displayed on the dashboard." -ForegroundColor White
 
 if (-not $EmployeeName) { $EmployeeName = Read-Host "  Employee Name (e.g. Sameer Malik)" }
 if (-not $EmployeeID)   { $EmployeeID   = Read-Host "  Employee ID   (e.g. EMP-1042)" }
 if (-not $Email)        { $Email        = Read-Host "  Email Address (e.g. sameer@company.com)" }
 if (-not $Department)   { $Department   = Read-Host "  Department    (e.g. Engineering)" }
 
-Write-Host "  ✓ Employee: $EmployeeName ($EmployeeID) - $Department" -ForegroundColor Green
+Write-Host "  + Employee: $EmployeeName ($EmployeeID) - $Department" -ForegroundColor Green
 
-# ── Step 3: Create Directories & Files ────────────────────────────────────────
+# --- Step 3: Create Directories & Files ---
 Write-Host ""
 Write-Host "  [STEP 3/5] Creating configuration files..." -ForegroundColor Yellow
 
@@ -72,9 +72,9 @@ $Secret        = "SecureEnrollmentSecret2026!"
 # Check osquery installation
 if (-not (Test-Path $OsqueryDaemon)) {
     Write-Host ""
-    Write-Host "  ❌ Osquery not found at: $OsqueryDaemon" -ForegroundColor Red
+    Write-Host "  [ERROR] Osquery not found at: $OsqueryDaemon" -ForegroundColor Red
     Write-Host "  Please install Osquery MSI first:" -ForegroundColor Yellow
-    Write-Host "  https://github.com/osquery/osquery/releases" -ForegroundColor Cyan
+    Write-Host "  https://osquery.io/downloads" -ForegroundColor Cyan
     Write-Host ""
     Read-Host "  Press Enter to exit"
     Exit 1
@@ -85,7 +85,7 @@ New-Item -ItemType Directory -Force -Path "$TargetDir\certs" | Out-Null
 
 # Write enroll_secret
 [System.IO.File]::WriteAllText("$TargetDir\enroll_secret", $Secret)
-Write-Host "  ✓ enroll_secret written" -ForegroundColor Green
+Write-Host "  + enroll_secret written" -ForegroundColor Green
 
 # Write employee.json
 $EmpJson = @"
@@ -97,7 +97,7 @@ $EmpJson = @"
 }
 "@
 [System.IO.File]::WriteAllText("$TargetDir\employee.json", $EmpJson)
-Write-Host "  ✓ employee.json written → $TargetDir\employee.json" -ForegroundColor Green
+Write-Host "  + employee.json written -> $TargetDir\employee.json" -ForegroundColor Green
 
 # Write osquery.flags
 $FlagsContent = @"
@@ -126,14 +126,14 @@ $FlagsContent = @"
 --enroll_secret_path=C:\ProgramData\osquery\enroll_secret
 "@
 [System.IO.File]::WriteAllText("$TargetDir\osquery.flags", $FlagsContent)
-Write-Host "  ✓ osquery.flags written" -ForegroundColor Green
+Write-Host "  + osquery.flags written" -ForegroundColor Green
 
-# Write activity monitor script (reads employee.json → registry every 2 seconds)
+# Write activity monitor script
 $MonitorScript = @'
 # Susalabs WFH Activity Monitor
-# Yeh background mein chalta hai - registry update karta rehta hai
+# Background service to track user presence
 
-Add-Type -TypeDefinition @'
+$CsharpCode = '
 using System;
 using System.Runtime.InteropServices;
 namespace Win32 {
@@ -147,7 +147,8 @@ namespace Win32 {
         }
     }
 }
-'@ -ErrorAction SilentlyContinue
+'
+Add-Type -TypeDefinition $CsharpCode -ErrorAction SilentlyContinue
 
 function Get-UserIdleTime {
     $lii = New-Object Win32.Win32Input+LASTINPUTINFO
@@ -193,9 +194,9 @@ while ($true) {
 }
 '@
 [System.IO.File]::WriteAllText("$TargetDir\activity_monitor.ps1", $MonitorScript)
-Write-Host "  ✓ activity_monitor.ps1 written → $TargetDir\activity_monitor.ps1" -ForegroundColor Green
+Write-Host "  + activity_monitor.ps1 written -> $TargetDir\activity_monitor.ps1" -ForegroundColor Green
 
-# ── Step 4: Register Osquery as Windows Service (auto-start on boot) ──────────
+# --- Step 4: Register Osquery as Windows Service (auto-start on boot) ---
 Write-Host ""
 Write-Host "  [STEP 4/5] Registering Osquery as Windows Service..." -ForegroundColor Yellow
 
@@ -222,14 +223,14 @@ try {
     sc.exe failure "osqueryd" reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
 
     Start-Service -Name "osqueryd" -ErrorAction Stop
-    Write-Host "  ✓ Osquery Windows Service registered (auto-start on boot)" -ForegroundColor Green
-    Write-Host "  ✓ Service started successfully" -ForegroundColor Green
+    Write-Host "  + Osquery Windows Service registered (auto-start on boot)" -ForegroundColor Green
+    Write-Host "  + Service started successfully" -ForegroundColor Green
 } catch {
-    Write-Host "  ⚠ Service registration failed: $_" -ForegroundColor Yellow
+    Write-Host "  [WARNING] Service registration failed: $_" -ForegroundColor Yellow
     Write-Host "  Agent will start manually instead." -ForegroundColor Yellow
 }
 
-# ── Step 5: Register Activity Monitor in Task Scheduler (auto-start on login) ─
+# --- Step 5: Register Activity Monitor in Task Scheduler (auto-start on login) ---
 Write-Host ""
 Write-Host "  [STEP 5/5] Registering Activity Monitor in Task Scheduler..." -ForegroundColor Yellow
 
@@ -263,23 +264,23 @@ try {
         -Trigger   $taskTrigger `
         -Settings  $taskSettings `
         -Principal $taskPrincipal `
-        -Description "Susalabs WFH Tracker: Monitors keyboard/mouse activity and writes employee info to registry." `
+        -Description "Susalabs WFH Tracker: Monitors keyboard/mouse activity." `
         -ErrorAction Stop | Out-Null
 
     # Start task immediately for this session
     Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 
-    Write-Host "  ✓ Activity Monitor registered in Task Scheduler" -ForegroundColor Green
-    Write-Host "  ✓ Runs automatically at every login (no admin needed)" -ForegroundColor Green
+    Write-Host "  + Activity Monitor registered in Task Scheduler" -ForegroundColor Green
+    Write-Host "  + Runs automatically at every login (no admin needed)" -ForegroundColor Green
 } catch {
-    Write-Host "  ⚠ Task Scheduler registration failed: $_" -ForegroundColor Yellow
+    Write-Host "  [WARNING] Task Scheduler registration failed: $_" -ForegroundColor Yellow
 }
 
-# ── Done ───────────────────────────────────────────────────────────────────────
+# --- Done ---
 Write-Host ""
-Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "  ║              ✅  SETUP COMPLETE!                     ║" -ForegroundColor Green
-Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "  ======================================================" -ForegroundColor Green
+Write-Host "                 SETUP COMPLETE!                        " -ForegroundColor Green
+Write-Host "  ======================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Employee   : $EmployeeName ($EmployeeID)" -ForegroundColor White
 Write-Host "  Department : $Department" -ForegroundColor White
@@ -287,11 +288,11 @@ Write-Host "  Email      : $Email" -ForegroundColor White
 Write-Host "  Server     : $ServerAddress" -ForegroundColor White
 Write-Host ""
 Write-Host "  What happens now:" -ForegroundColor Cyan
-Write-Host "  • Osquery starts automatically when Windows boots" -ForegroundColor White
-Write-Host "  • Activity monitor starts automatically when you log in" -ForegroundColor White
-Write-Host "  • Sleep/Lock: Agent continues running (no restart needed)" -ForegroundColor White
-Write-Host "  • Shutdown + Restart: Agent auto-restarts after login" -ForegroundColor White
+Write-Host "  * Osquery starts automatically when Windows boots" -ForegroundColor White
+Write-Host "  * Activity monitor starts automatically when you log in" -ForegroundColor White
+Write-Host "  * Sleep/Lock: Agent continues running (no restart needed)" -ForegroundColor White
+Write-Host "  * Shutdown + Restart: Agent auto-restarts after login" -ForegroundColor White
 Write-Host ""
-Write-Host "  Dashboard : https://$ServerAddress (replace port with 3000 if direct)" -ForegroundColor Cyan
+Write-Host "  Dashboard : https://$ServerAddress" -ForegroundColor Cyan
 Write-Host ""
 Read-Host "  Press Enter to close"
