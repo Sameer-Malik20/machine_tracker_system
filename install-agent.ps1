@@ -6,9 +6,9 @@
 # This script will automatically:
 #   1. Create osquery config files
 #   2. Create employee.json configuration
-#   3. Install activity monitor script
-#   4. Register in Windows Task Scheduler (auto-start on login)
-#   5. Configure Osquery Windows Service (auto-start on boot)
+#   3. Install activity monitor script (running inside active user session)
+#   4. Configure Osquery Windows Service (auto-start on boot)
+#   5. Register in Windows Startup folder (auto-start on login, completely hidden)
 # ==============================================================================
 
 param(
@@ -128,7 +128,7 @@ $FlagsContent = @"
 [System.IO.File]::WriteAllText("$TargetDir\osquery.flags", $FlagsContent)
 Write-Host "  + osquery.flags written" -ForegroundColor Green
 
-# Write activity monitor script
+# Write activity monitor script (reads employee.json -> registry every 2 seconds)
 $MonitorScript = @'
 # Susalabs WFH Activity Monitor
 # Background service to track user presence
@@ -140,6 +140,8 @@ namespace Win32 {
     public class Win32Input {
         [DllImport("user32.dll")]
         public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+        [DllImport("kernel32.dll")]
+        public static extern uint GetTickCount();
         [StructLayout(LayoutKind.Sequential)]
         public struct LASTINPUTINFO {
             public uint cbSize;
@@ -154,9 +156,12 @@ function Get-UserIdleTime {
     $lii = New-Object Win32.Win32Input+LASTINPUTINFO
     $lii.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($lii)
     if ([Win32.Win32Input]::GetLastInputInfo([ref]$lii)) {
-        $idle = [Environment]::TickCount - $lii.dwTime
-        if ($idle -lt 0) { $idle = [uint32]::MaxValue - $lii.dwTime + [Environment]::TickCount }
-        return $idle
+        $ticks = [Win32.Win32Input]::GetTickCount()
+        if ($ticks -ge $lii.dwTime) {
+            return ($ticks - $lii.dwTime)
+        } else {
+            return ([uint32]::MaxValue - $lii.dwTime + $ticks)
+        }
     }
     return 0
 }
@@ -170,6 +175,7 @@ if (-not (Test-Path $regPath)) {
 while ($true) {
     try {
         $idleSecs = [Math]::Round((Get-UserIdleTime) / 1000)
+        # Mark as Idle if inactive for more than 60 seconds
         $status   = if ($idleSecs -gt 60) { "Idle" } else { "Active" }
 
         $empName  = "Unknown Employee"; $empId = ""; $empEmail = ""; $dept = ""
@@ -184,7 +190,7 @@ while ($true) {
 
         Set-ItemProperty -Path $regPath -Name "ActiveStatus"   -Value $status   -Force | Out-Null
         Set-ItemProperty -Path $regPath -Name "IdleSeconds"    -Value $idleSecs  -Force | Out-Null
-        Set-ItemProperty -Path $regPath -Name "LastInputTime"  -Value (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ") -Force | Out-Null
+        Set-ItemProperty -Path $regPath -Name "LastInputTime"  -Value ([DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")) -Force | Out-Null
         Set-ItemProperty -Path $regPath -Name "EmployeeName"   -Value $empName   -Force | Out-Null
         Set-ItemProperty -Path $regPath -Name "EmployeeID"     -Value $empId     -Force | Out-Null
         Set-ItemProperty -Path $regPath -Name "EmployeeEmail"  -Value $empEmail  -Force | Out-Null
@@ -230,50 +236,30 @@ try {
     Write-Host "  Agent will start manually instead." -ForegroundColor Yellow
 }
 
-# --- Step 5: Register Activity Monitor in Task Scheduler (auto-start on login) ---
+# --- Step 5: Register in Windows Startup folder (auto-start on login) ---
 Write-Host ""
-Write-Host "  [STEP 5/5] Registering Activity Monitor in Task Scheduler..." -ForegroundColor Yellow
+Write-Host "  [STEP 5/5] Registering Activity Monitor in Startup..." -ForegroundColor Yellow
 
 try {
-    $taskName   = "Susalabs-ActivityMonitor"
-    $taskAction = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File `"$TargetDir\activity_monitor.ps1`""
+    $StartupDir = [System.Environment]::GetFolderPath('Startup')
+    $LauncherPath = Join-Path $StartupDir "Susalabs-ActivityMonitor.vbs"
     
-    $taskTrigger = New-ScheduledTaskTrigger -AtLogOn
-    
-    $taskSettings = New-ScheduledTaskSettingsSet `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable `
-        -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
-        -RestartCount 3 `
-        -RestartInterval (New-TimeSpan -Minutes 1)
+    # Write VBS launcher to run powershell completely hidden in active user session
+    $VbsContent = @"
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\ProgramData\osquery\activity_monitor.ps1", 0, false
+"@
+    [System.IO.File]::WriteAllText($LauncherPath, $VbsContent)
+    Write-Host "  + VBS Launcher written to Startup: $LauncherPath" -ForegroundColor Green
 
-    $taskPrincipal = New-ScheduledTaskPrincipal `
-        -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
-        -LogonType Interactive `
-        -RunLevel Limited
+    # Terminate any existing PowerShell instance of activity_monitor
+    Get-Process -Name "powershell" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*activity_monitor.ps1*" } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-    # Remove existing task if any
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-
-    Register-ScheduledTask `
-        -TaskName  $taskName `
-        -Action    $taskAction `
-        -Trigger   $taskTrigger `
-        -Settings  $taskSettings `
-        -Principal $taskPrincipal `
-        -Description "Susalabs WFH Tracker: Monitors keyboard/mouse activity." `
-        -ErrorAction Stop | Out-Null
-
-    # Start task immediately for this session
-    Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-
-    Write-Host "  + Activity Monitor registered in Task Scheduler" -ForegroundColor Green
-    Write-Host "  + Runs automatically at every login (no admin needed)" -ForegroundColor Green
+    # Launch immediately in current session
+    wscript.exe "$LauncherPath"
+    Write-Host "  + Activity Monitor launched successfully in current session" -ForegroundColor Green
 } catch {
-    Write-Host "  [WARNING] Task Scheduler registration failed: $_" -ForegroundColor Yellow
+    Write-Host "  [WARNING] Startup folder registration failed: $_" -ForegroundColor Yellow
 }
 
 # --- Done ---
@@ -289,9 +275,9 @@ Write-Host "  Server     : $ServerAddress" -ForegroundColor White
 Write-Host ""
 Write-Host "  What happens now:" -ForegroundColor Cyan
 Write-Host "  * Osquery starts automatically when Windows boots" -ForegroundColor White
-Write-Host "  * Activity monitor starts automatically when you log in" -ForegroundColor White
-Write-Host "  * Sleep/Lock: Agent continues running (no restart needed)" -ForegroundColor White
-Write-Host "  * Shutdown + Restart: Agent auto-restarts after login" -ForegroundColor White
+Write-Host "  * Activity monitor starts automatically in active session when you log in" -ForegroundColor White
+Write-Host "  * Sleep/Lock: Agent continues running" -ForegroundColor White
+Write-Host "  * Shutdown + Restart: Agent auto-restarts" -ForegroundColor White
 Write-Host ""
 Write-Host "  Dashboard : https://$ServerAddress" -ForegroundColor Cyan
 Write-Host ""
