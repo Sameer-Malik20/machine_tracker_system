@@ -1384,10 +1384,10 @@ export default function DashboardPage() {
                                   <td>
                                     <span
                                       className={`status-badge ${host.status === "Active"
-                                          ? "status-active"
-                                          : host.status === "Idle"
-                                            ? "status-idle"
-                                            : "status-offline"
+                                        ? "status-active"
+                                        : host.status === "Idle"
+                                          ? "status-idle"
+                                          : "status-offline"
                                         }`}
                                     >
                                       {host.status}
@@ -1882,10 +1882,10 @@ export default function DashboardPage() {
                     <h2 style={{ fontSize: "1.15rem", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "10px" }}>
                       {inspectingHost.employeeName || inspectingHost.hostname}
                       <span className={`status-badge ${inspectingHost.status === "Active"
-                          ? "status-active"
-                          : inspectingHost.status === "Idle"
-                            ? "status-idle"
-                            : "status-offline"
+                        ? "status-active"
+                        : inspectingHost.status === "Idle"
+                          ? "status-idle"
+                          : "status-offline"
                         }`} style={{ fontSize: "0.64rem", padding: "2px 8px" }}>
                         {inspectingHost.status}
                       </span>
@@ -2095,11 +2095,22 @@ export default function DashboardPage() {
                               const details = item.details || "";
                               const firstPipe = details.indexOf("|");
                               const process = firstPipe > -1 ? details.substring(0, firstPipe) : details;
-                              const title = firstPipe > -1 ? details.substring(firstPipe + 1) : "";
+
+                              let title = "";
+                              let url = "";
+                              const remaining = firstPipe > -1 ? details.substring(firstPipe + 1) : "";
+                              const urlIndex = remaining.indexOf("|URL:");
+                              if (urlIndex > -1) {
+                                title = remaining.substring(0, urlIndex);
+                                url = remaining.substring(urlIndex + 5);
+                              } else {
+                                title = remaining;
+                              }
                               return {
                                 timestamp: item.timestamp,
                                 process,
-                                title
+                                title,
+                                url
                               };
                             });
 
@@ -2140,7 +2151,7 @@ export default function DashboardPage() {
                                 const date = new Date(tsStr);
                                 if (isNaN(date.getTime())) return "N/A";
                                 return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-                              } catch (e) {
+                              } catch {
                                 return "N/A";
                               }
                             };
@@ -2152,7 +2163,7 @@ export default function DashboardPage() {
                                     <tr>
                                       <th>Time</th>
                                       <th>Application</th>
-                                      <th>Window Title</th>
+                                      <th>URL / Window Title</th>
                                       <th>Duration</th>
                                     </tr>
                                   </thead>
@@ -2167,8 +2178,23 @@ export default function DashboardPage() {
                                             {item.process}
                                           </span>
                                         </td>
-                                        <td style={{ fontWeight: 600, color: "var(--text-primary)", maxWidth: "300px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={item.title}>
-                                          {item.title || "Untitled Window"}
+                                        <td style={{ maxWidth: "350px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                          {item.url ? (
+                                            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                                              <a href={item.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent-text)", textDecoration: "underline", fontWeight: 600 }} title={item.url}>
+                                                {item.url}
+                                              </a>
+                                              {item.title && (
+                                                <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis" }} title={item.title}>
+                                                  {item.title}
+                                                </span>
+                                              )}
+                                            </div>
+                                          ) : (
+                                            <span style={{ fontWeight: 600, color: "var(--text-primary)" }} title={item.title}>
+                                              {item.title || "Untitled Window"}
+                                            </span>
+                                          )}
                                         </td>
                                         <td style={{ whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontWeight: 600 }}>
                                           {formatDuration(item.durationSec)}
@@ -2189,7 +2215,7 @@ export default function DashboardPage() {
                           {(() => {
                             const chromeHist = inspectingHost.latestResults?.["chrome_history"] || [];
                             const edgeHist = inspectingHost.latestResults?.["edge_history"] || [];
-                            
+
                             // Combine history and sort by last_visit_time descending
                             const combinedHist = ([
                               ...chromeHist.map(h => ({ ...h, browser: "Chrome" })),
@@ -2220,7 +2246,7 @@ export default function DashboardPage() {
                                 // Check if valid date
                                 if (isNaN(date.getTime())) return "N/A";
                                 return date.toLocaleString();
-                              } catch (e) {
+                              } catch {
                                 return "N/A";
                               }
                             };

@@ -12,6 +12,7 @@ This project is an enterprise-grade solution designed to monitor 500+ remote wor
    - [macOS Installation](#macos-installation)
 4. [VPS Deployment Guide (Next.js Server)](#4-vps-deployment-guide-nextjs-server)
 5. [Local Development & Quick Testing Guide](#5-local-development--quick-testing-guide)
+6. [Technology Stack & Architecture Decisions](#6-technology-stack--architecture-decisions)
 
 ---
 
@@ -262,3 +263,33 @@ We have provided a helper script [run-real-agent.ps1](file:///c:/Projects/WFH_Tr
    ```
 3. Type `y` when prompted to verify that the local SSL proxy is running.
 4. **Observe the Results**: The real Osquery daemon will register your host, retrieve the query configurations, and stream your system's actual processes and telemetry logs to the browser dashboard!
+
+---
+
+## 6. Technology Stack & Architecture Decisions
+
+This section provides an overview of the core technologies used in this project, why they were chosen, and their strategic role in the architecture.
+
+### Backend & Frontend Framework
+- **Next.js 16 (App Router)** & **React 19**:
+  - *Why*: We chose Next.js to combine both the frontend telemetry dashboard and the backend TLS API endpoints (`/api/osquery/*`) into a single, unified, high-performance repository. This eliminates cross-origin resource sharing (CORS) complexities and allows seamless Server Action communications.
+  - *Serverless & Edge Ready*: Next.js API routes are built on Web APIs, making the logging backend easily deployable in serverless or containerized environments.
+
+### Dashboard UI & Styling
+- **TailwindCSS v4**:
+  - *Why*: Provides utility-first styling that enables building highly customized, modern, responsive, and beautiful layouts quickly. It keeps the CSS bundle size minimal by removing unused rules in production.
+- **Framer Motion**:
+  - *Why*: Implements smooth animations, micro-interactions, and visual transitions when expanding client statistics or toggling dashboards. This delivers a premium enterprise interface experience.
+
+### Client Telemetry Agent
+- **Osquery Daemon (`osqueryd`)**:
+  - *Why*: Endpoint monitoring is inherently security-critical. Instead of writing a custom heavy agent that runs low-level hooks on target systems, we utilize Osquery. Osquery is a battle-tested, highly performant daemon created by Facebook that exposes operating system internals (processes, open ports, system configuration) as SQL tables.
+  - *Built-in RocksDB Cache*: Osquery relies on an embedded RocksDB key-value store. If the client machine is disconnected from the internet, RocksDB automatically caches telemetry logs locally and flushes them to the server upon reconnection, guaranteeing zero data loss.
+
+### Automation & Deployment Scripts
+- **PowerShell Agent Installer (`install-agent.ps1` / `run-real-agent.ps1`)**:
+  - *Why*: Automating the configuration of Osquery on Windows endpoints (which requires running as a service, setting system flags, and placing certificates) is critical for easy deployment.
+  - *Browser History SQLite Bypass*: Active browsers (Google Chrome, MS Edge) hold locks on their history SQLite files. The installer implements a stream-based FileStream reader with `ReadWrite` sharing configuration to copy browser databases on the fly without closing active browsers.
+- **Python Telemetry Simulator (`test-agent.py`)**:
+  - *Why*: Testing TLS APIs locally without real Osquery binaries or HTTPS proxy configuration can be slow. The Python simulator mimics the full TLS enrollment, config handshake, and payload logging behavior for easy API debugging on any platform.
+

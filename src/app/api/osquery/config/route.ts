@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
           description: "Collects active network sockets (established and listening ports) on the system."
         },
         user_activity: {
-          query: "SELECT name, data FROM registry WHERE path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\ActiveStatus' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\IdleSeconds' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\LastInputTime' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\EmployeeName' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\EmployeeID' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\EmployeeEmail' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\Department' FROM users WHERE uuid LIKE 'S-1-5-21-%');",
+          query: "SELECT name, data FROM registry WHERE path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveStatus' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\IdleSeconds' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\LastInputTime' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeName' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeID' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeEmail' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\Department';",
           interval: intervals.activityInterval,
           snapshot: true,
           description: "Tracks active user keyboard and mouse interaction telemetry from the Windows Registry."
@@ -106,16 +106,13 @@ export async function POST(req: NextRequest) {
           description: "Retrieves Edge browser history from the copied SQLite database via ATC."
         },
         window_history: {
-          // activity_monitor.ps1 writes to HKCU\Software\Monetra\Activity\WindowHistory
-          // HKCU maps to HKEY_USERS\<SID> - query both paths for maximum compatibility
-          query: "SELECT name as timestamp, data as details FROM registry WHERE key IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\WindowHistory' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR key = 'HKEY_CURRENT_USER\\\\Software\\\\Monetra\\\\Activity\\\\WindowHistory';",
+          query: "SELECT name as timestamp, data as details FROM registry WHERE key LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\WindowHistory';",
           interval: 10,
           snapshot: true,
           description: "Tracks active window foreground changes over time."
         },
         active_window: {
-          // Reads the current foreground window and employee activity from HKCU directly
-          query: "SELECT name, data FROM registry WHERE path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\ActiveStatus' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\IdleSeconds' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\LastInputTime' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\ActiveWindowTitle' FROM users WHERE uuid LIKE 'S-1-5-21-%') OR path IN (SELECT 'HKEY_USERS\\\\' || uuid || '\\\\Software\\\\Monetra\\\\Activity\\\\ActiveWindowUrl' FROM users WHERE uuid LIKE 'S-1-5-21-%');",
+          query: "SELECT name, data FROM registry WHERE path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveStatus' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\IdleSeconds' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\LastInputTime' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveWindowTitle' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveWindowUrl';",
           interval: 10,
           snapshot: true,
           description: "High-frequency poll of user active/idle status and current window URL."

@@ -83,6 +83,19 @@ if (-not (Test-Path $OsqueryDaemon)) {
 New-Item -ItemType Directory -Force -Path $TargetDir      | Out-Null
 New-Item -ItemType Directory -Force -Path "$TargetDir\certs" | Out-Null
 
+# Copy the server proxy's certificate so the agent can trust it (only for local/developer setups)
+$isLocal = ($ServerAddress -like "*localhost*" -or $ServerAddress -like "*127.0.0.1*" -or $ServerAddress -like "*192.168.*" -or $ServerAddress -like "*10.*")
+
+if ($isLocal) {
+    $LocalCert = Join-Path $PSScriptRoot "cert.pem"
+    if (Test-Path $LocalCert) {
+        Copy-Item -Path $LocalCert -Destination "$TargetDir\certs\cert.pem" -Force
+        Write-Host "  + cert.pem copied to $TargetDir\certs\cert.pem" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARNING] cert.pem not found in script directory." -ForegroundColor Yellow
+    }
+}
+
 # Write enroll_secret
 [System.IO.File]::WriteAllText("$TargetDir\enroll_secret", $Secret)
 Write-Host "  + enroll_secret written" -ForegroundColor Green
@@ -118,13 +131,14 @@ $FlagsContent = @"
 # Refresh frequencies
 --config_tls_refresh=60
 --logger_tls_period=10
-
-# Allow self-signed certs (for internal network)
---tls_allow_unsafe=true
-
-# Enrollment secret
---enroll_secret_path=C:\ProgramData\osquery\enroll_secret
 "@
+
+if ($isLocal) {
+    $FlagsContent += "`n`n# Allow self-signed certs (for internal network)`n--tls_allow_unsafe=true`n--tls_server_certs=C:\ProgramData\osquery\certs\cert.pem"
+}
+
+$FlagsContent += "`n`n# Enrollment secret`n--enroll_secret_path=C:\ProgramData\osquery\enroll_secret"
+
 [System.IO.File]::WriteAllText("$TargetDir\osquery.flags", $FlagsContent)
 Write-Host "  + osquery.flags written" -ForegroundColor Green
 
@@ -207,12 +221,12 @@ function Get-UserIdleTime {
 function Get-ActiveWindow {
     $hwnd = [Win32.Win32Input]::GetForegroundWindow()
     if ($hwnd -ne [IntPtr]::Zero) {
-        $pid = 0
-        [Win32.Win32Input]::GetWindowThreadProcessId($hwnd, [ref]$pid) | Out-Null
+        $processId = 0
+        [Win32.Win32Input]::GetWindowThreadProcessId($hwnd, [ref]$processId) | Out-Null
         $sb = New-Object System.Text.StringBuilder 512
         [Win32.Win32Input]::GetWindowText($hwnd, $sb, $sb.Capacity) | Out-Null
         $title = $sb.ToString()
-        $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
         $name = if ($proc) { $proc.ProcessName } else { "Unknown" }
         
         $url = ""
@@ -304,58 +318,64 @@ while ($true) {
             $userName = [System.Environment]::UserName
             $destDir  = "C:\ProgramData\osquery"
 
-            $browsers = @(
-                @{ Dir = "C:\Users\$userName\AppData\Local\Google\Chrome\User Data\Default"; Prefix = "chrome_history" },
-                @{ Dir = "C:\Users\$userName\AppData\Local\Microsoft\Edge\User Data\Default";  Prefix = "edge_history" }
+            $browserRoots = @(
+                @{ Root = "C:\Users\$userName\AppData\Local\Google\Chrome\User Data"; Prefix = "chrome_history" },
+                @{ Root = "C:\Users\$userName\AppData\Local\Microsoft\Edge\User Data";  Prefix = "edge_history" }
             )
 
-            foreach ($br in $browsers) {
-                $mainSrc = "$($br.Dir)\History"
-                if (-not (Test-Path $mainSrc)) { continue }
+            foreach ($br in $browserRoots) {
+                if (-not (Test-Path $br.Root)) { continue }
+                
+                # Find all subdirectories that contain a 'History' file
+                $historyFiles = Get-ChildItem -Path $br.Root -Depth 2 -Filter "History" -File -ErrorAction SilentlyContinue
+                
+                # Copy the one with the newest LastWriteTime (active profile session)
+                if ($historyFiles) {
+                    $activeHistory = $historyFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                    $profileDir = $activeHistory.DirectoryName
+                    
+                    $filePairs = @(
+                        @{ Src = "$profileDir\History";     Dest = "$destDir\$($br.Prefix).db" },
+                        @{ Src = "$profileDir\History-wal"; Dest = "$destDir\$($br.Prefix).db-wal" },
+                        @{ Src = "$profileDir\History-shm"; Dest = "$destDir\$($br.Prefix).db-shm" }
+                    )
 
-                # Copy each SQLite file: main db + WAL + SHM
-                $filePairs = @(
-                    @{ Src = "$($br.Dir)\History";     Dest = "$destDir\$($br.Prefix).db" },
-                    @{ Src = "$($br.Dir)\History-wal"; Dest = "$destDir\$($br.Prefix).db-wal" },
-                    @{ Src = "$($br.Dir)\History-shm"; Dest = "$destDir\$($br.Prefix).db-shm" }
-                )
+                    foreach ($fp in $filePairs) {
+                        if (-not (Test-Path $fp.Src)) { continue }
+                        $copied = $false
 
-                foreach ($fp in $filePairs) {
-                    if (-not (Test-Path $fp.Src)) { continue }
-                    $copied = $false
-
-                    # Method 1: Direct copy (works when browser is closed)
-                    try {
-                        [System.IO.File]::Copy($fp.Src, $fp.Dest, $true)
-                        $copied = $true
-                    } catch {}
-
-                    # Method 2: FileStream with ReadWrite share (works while Chrome is open)
-                    # Chrome uses SQLite byte-range locks, not exclusive file locks
-                    if (-not $copied) {
+                        # Method 1: Direct copy (works when browser is closed)
                         try {
-                            $fs    = [System.IO.File]::Open($fp.Src, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                            $outFs = [System.IO.File]::Open($fp.Dest, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-                            $fs.CopyTo($outFs)
-                            $outFs.Flush(); $outFs.Close(); $fs.Close()
+                            [System.IO.File]::Copy($fp.Src, $fp.Dest, $true)
                             $copied = $true
                         } catch {}
-                    }
 
-                    # Method 3: robocopy /B (backup mode, needs admin)
-                    if (-not $copied) {
-                        try {
-                            $srcDir  = [System.IO.Path]::GetDirectoryName($fp.Src)
-                            $srcFile = [System.IO.Path]::GetFileName($fp.Src)
-                            $tmpDir  = "$destDir\tmp_br"
-                            New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
-                            robocopy $srcDir $tmpDir $srcFile /B /NFL /NDL /NJH /NJS /NC /NS /NP 2>$null | Out-Null
-                            $tmpFile = "$tmpDir\$srcFile"
-                            if (Test-Path $tmpFile) {
-                                [System.IO.File]::Copy($tmpFile, $fp.Dest, $true)
-                                Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
-                            }
-                        } catch {}
+                        # Method 2: FileStream with ReadWrite share (works while Chrome is open)
+                        if (-not $copied) {
+                            try {
+                                $fs    = [System.IO.File]::Open($fp.Src, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                                $outFs = [System.IO.File]::Open($fp.Dest, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                                $fs.CopyTo($outFs)
+                                $outFs.Flush(); $outFs.Close(); $fs.Close()
+                                $copied = $true
+                            } catch {}
+                        }
+
+                        # Method 3: robocopy /B (backup mode, needs admin)
+                        if (-not $copied) {
+                            try {
+                                $srcDir  = [System.IO.Path]::GetDirectoryName($fp.Src)
+                                $srcFile = [System.IO.Path]::GetFileName($fp.Src)
+                                $tmpDir  = "$destDir\tmp_br"
+                                New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+                                robocopy $srcDir $tmpDir $srcFile /B /NFL /NDL /NJH /NJS /NC /NS /NP 2>$null | Out-Null
+                                $tmpFile = "$tmpDir\$srcFile"
+                                if (Test-Path $tmpFile) {
+                                    [System.IO.File]::Copy($tmpFile, $fp.Dest, $true)
+                                    Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+                                }
+                            } catch {}
+                        }
                     }
                 }
             }

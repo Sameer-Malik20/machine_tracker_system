@@ -187,26 +187,26 @@ export class ActivityTracker {
       } else {
         // Merge diff updates (respecting 'added' and 'removed')
         const list = state.latestResults[queryName];
-        
+
         for (const item of logItems) {
           const cols = item.columns;
           const action = item.action;
-          
+
           let index = -1;
           if (queryName === "running_processes") {
             index = list.findIndex(r => r.pid === cols.pid);
           } else if (queryName === "user_activity") {
             index = list.findIndex(r => r.name === cols.name);
           } else if (queryName === "active_network_sockets") {
-            index = list.findIndex(r => 
-              r.pid === cols.pid && 
-              r.local_port === cols.local_port && 
+            index = list.findIndex(r =>
+              r.pid === cols.pid &&
+              r.local_port === cols.local_port &&
               r.remote_port === cols.remote_port
             );
           } else {
             index = list.findIndex(r => JSON.stringify(r) === JSON.stringify(cols));
           }
-          
+
           if (action === "added") {
             if (index > -1) {
               list[index] = cols; // Update existing
@@ -220,7 +220,7 @@ export class ActivityTracker {
           }
         }
       }
-      
+
       state.recentQueries.unshift({
         queryName,
         timestamp: now,
@@ -304,7 +304,7 @@ export class ActivityTracker {
       const secondsSinceLastHeartbeat = Math.floor((now.getTime() - node.lastHeartbeat.getTime()) / 1000);
       const userActivity = node.latestResults?.["user_activity"];
       const activeStatus = userActivity?.find(r => r.name === "ActiveStatus")?.data;
-      
+
       if (secondsSinceLastHeartbeat > this.OFFLINE_THRESHOLD) {
         this.updateStatus(node, "Offline");
       } else if (secondsSinceLastHeartbeat > this.MAX_EXPECTED_LOG_INTERVAL) {
