@@ -1,6 +1,9 @@
 /**
- * WFH Tracker System - Database Adaptation & Simulation Layer
+ * WFH Tracker System - Real MongoDB Database Adapter & Connection Manager
  */
+
+import mongoose from "mongoose";
+import MachineLog from "./models/MachineLog";
 
 export interface OsqueryLogEntry {
   name: string;           // Name of the scheduled query (e.g. running_processes)
@@ -15,49 +18,97 @@ export interface OsqueryPayload {
   data: OsqueryLogEntry[];
 }
 
+const MONGODB_URI = process.env.MONGODB_URI;
+
+let cached = (globalThis as any).mongoose;
+
+if (!cached) {
+  cached = (globalThis as any).mongoose = { conn: null, promise: null };
+}
+
+export async function connectDB() {
+  if (!MONGODB_URI) {
+    throw new Error("MONGODB_URI is not set in environment variables");
+  }
+
+  if (cached.conn) {
+    return cached.conn;
+  }
+
+  if (!cached.promise) {
+    const opts = {
+      bufferCommands: false,
+    };
+
+    cached.promise = mongoose.connect(MONGODB_URI, opts).then((mongooseInstance) => {
+      console.log("[MongoDB] Connected successfully to Cluster0");
+      return mongooseInstance;
+    }).catch(err => {
+      console.error("[MongoDB] Connection error:", err);
+      throw err;
+    });
+  }
+
+  try {
+    cached.conn = await cached.promise;
+  } catch (e) {
+    cached.promise = null;
+    throw e;
+  }
+
+  return cached.conn;
+}
+
 export class DatabaseSimulator {
   /**
-   * Simulates inserting logs into PostgreSQL (Relational Database)
-   * Using batch execution to handle high-concurrency (500+ endpoints)
+   * Simulates inserting logs into PostgreSQL (Relational Database Mock)
    */
   static async insertToPostgreSQL(nodeKey: string, logs: OsqueryLogEntry[]): Promise<boolean> {
-    // In production: Use a connection pool (e.g., pg-pool) and execute a bulk INSERT query
-    // e.g., INSERT INTO host_query_results (node_key, query_name, action, columns, logged_at) VALUES ...
-    
-    // Simulate latency (e.g., 5-15ms database roundtrip)
-    await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 10) + 5));
-
-    console.log(`[DB SIMULATOR - PostgreSQL] Batch inserting ${logs.length} logs for node: ${nodeKey}`);
-    
-    // Log details of first log row for transparency in logs
-    if (logs.length > 0) {
-      const first = logs[0];
-      console.log(
-        `[PostgreSQL Query Mock] INSERT INTO host_logs (node_key, query, action, data) VALUES ('${nodeKey}', '${first.name}', '${first.action}', '${JSON.stringify(first.columns)}')`
-      );
-    }
+    // Keep mock for relational data representation
     return true;
   }
 
   /**
-   * Simulates inserting logs into MongoDB (NoSQL Document Store)
-   * Using fast bulkWrite operations
+   * Real MongoDB document store inserts
    */
   static async insertToMongoDB(nodeKey: string, logs: OsqueryLogEntry[]): Promise<boolean> {
-    // In production: Use mongoose or mongodb driver and invoke bulkWrite()
-    // e.g., db.collection('host_logs').bulkWrite(logs.map(log => ({ insertOne: { document: { ...log, nodeKey } } })))
+    if (!logs || logs.length === 0) return true;
 
-    // Simulate latency (e.g., 3-10ms write time)
-    await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 7) + 3));
+    try {
+      await connectDB();
 
-    console.log(`[DB SIMULATOR - MongoDB] Bulk writing ${logs.length} documents for node: ${nodeKey}`);
-    
-    if (logs.length > 0) {
-      console.log(
-        `[MongoDB Write Mock] db.host_logs.insertMany([ ${logs.map(l => `{ node_key: "${nodeKey}", query: "${l.name}", action: "${l.action}" }`).slice(0, 1).join(", ")}... ])`
-      );
+      const docs = logs.map((log) => {
+        let logDate = new Date();
+        if (log.timestamp) {
+          const sec = parseFloat(log.timestamp);
+          if (!isNaN(sec)) {
+            logDate = new Date(sec * 1000);
+          } else {
+            const parsed = new Date(log.timestamp);
+            if (!isNaN(parsed.getTime())) {
+              logDate = parsed;
+            }
+          }
+        }
+
+        return {
+          nodeKey,
+          name: log.name,
+          action: log.action,
+          columns: log.columns,
+          timestamp: logDate,
+          archived: false,
+        };
+      });
+
+      // Bulk write/insert documents
+      await MachineLog.insertMany(docs, { ordered: false });
+      console.log(`[DB - MongoDB] Successfully saved ${logs.length} logs for node: ${nodeKey}`);
+      return true;
+    } catch (error) {
+      console.error(`[DB - MongoDB Error] Failed to write logs:`, error);
+      return false;
     }
-    return true;
   }
 
   /**
@@ -79,3 +130,4 @@ export class DatabaseSimulator {
     return { pgSuccess, mongoSuccess };
   }
 }
+export default connectDB;

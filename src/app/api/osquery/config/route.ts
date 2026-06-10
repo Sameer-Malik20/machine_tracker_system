@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
     console.log(`[API - Config] Config request received from node key: ${nodeKey} (Platform: ${platform})`);
 
     // Fetch dynamic admin-configured intervals
-    const intervals = SettingsManager.getIntervalsForPlatform(platform);
+    const intervals = await SettingsManager.getIntervalsForPlatform(platform);
 
     // Return the scheduled queries configuration (Osquery packs structure)
     const configResponse = {

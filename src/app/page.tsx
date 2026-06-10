@@ -89,11 +89,27 @@ export default function DashboardPage() {
   // Analytics Chart Range state
   const [chartRange, setChartRange] = useState<"today" | "7d" | "30d">("today");
 
+  // User Auth States
+  const [currentUser, setCurrentUser] = useState<{ email: string; role: "super_admin" | "admin" } | null>(null);
+  const [adminsList, setAdminsList] = useState<any[]>([]);
+  const [newAdminEmail, setNewAdminEmail] = useState("");
+  const [newAdminPassword, setNewAdminPassword] = useState("");
+  const [newAdminAssigned, setNewAdminAssigned] = useState<string[]>([]);
+  const [showCreateAdminModal, setShowCreateAdminModal] = useState(false);
+  const [editingAdmin, setEditingAdmin] = useState<any | null>(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+
   // Admin settings states
   const [settings, setSettings] = useState<{
+    logIntervalMinutes: number;
+    dataRetentionDays: number;
+    retentionAction: "delete" | "archive";
     windows: { processInterval: number; performanceInterval: number; networkInterval: number; activityInterval: number };
     mac: { processInterval: number; performanceInterval: number; networkInterval: number; activityInterval: number };
   }>({
+    logIntervalMinutes: 10,
+    dataRetentionDays: 30,
+    retentionAction: "archive",
     windows: { processInterval: 60, performanceInterval: 120, networkInterval: 60, activityInterval: 60 },
     mac: { processInterval: 60, performanceInterval: 120, networkInterval: 60, activityInterval: 60 }
   });
@@ -124,6 +140,19 @@ export default function DashboardPage() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [notifOpen]);
+
+  // Close user menu on outside click
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      const avatar = document.querySelector(".topnav-avatar");
+      if (avatar && !avatar.contains(e.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [userMenuOpen]);
 
   const toggleTheme = () => {
     const nextTheme = theme === "dark" ? "light" : "dark";
@@ -165,6 +194,43 @@ export default function DashboardPage() {
       clearInterval(interval);
     };
   }, []);
+
+  // Load session information and redirect if unauthorized
+  useEffect(() => {
+    const fetchMe = async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        if (res.ok) {
+          const data = await res.json();
+          setCurrentUser(data.user);
+        } else {
+          window.location.href = "/login";
+        }
+      } catch (err) {
+        console.error("Failed to load user info:", err);
+      }
+    };
+    fetchMe();
+  }, []);
+
+  // Fetch administrator users list (super_admin only)
+  const fetchAdmins = async () => {
+    try {
+      const res = await fetch("/api/admin/users");
+      if (res.ok) {
+        const data = await res.json();
+        setAdminsList(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch admin users:", err);
+    }
+  };
+
+  useEffect(() => {
+    if (currentUser?.role === "super_admin" && currentView === "settings") {
+      fetchAdmins();
+    }
+  }, [currentUser, currentView]);
 
   // Fetch settings on load
   useEffect(() => {
@@ -277,6 +343,17 @@ export default function DashboardPage() {
       setSettingsStatus("error: Failed to save settings.");
     } finally {
       setSettingsSaving(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      const res = await fetch("/api/auth/logout", { method: "POST" });
+      if (res.ok) {
+        window.location.href = "/login";
+      }
+    } catch (err) {
+      console.error("Failed to logout:", err);
     }
   };
 
@@ -870,6 +947,33 @@ export default function DashboardPage() {
           )}
 
           <div className="topnav-actions">
+            {currentUser && (
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", marginRight: "16px", borderRight: "1px solid var(--border-light)", paddingRight: "16px" }}>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+                  <span style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-primary)" }}>{currentUser.email}</span>
+                  <span style={{ fontSize: "0.68rem", color: "var(--accent-text)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em" }}>
+                    {currentUser.role === "super_admin" ? "Super Admin" : "Admin"}
+                  </span>
+                </div>
+                <button
+                  className="btn"
+                  onClick={handleLogout}
+                  style={{
+                    padding: "6px 12px",
+                    background: "rgba(239, 68, 68, 0.1)",
+                    color: "#f87171",
+                    border: "1px solid rgba(239, 68, 68, 0.2)",
+                    borderRadius: "8px",
+                    cursor: "pointer",
+                    fontSize: "0.76rem",
+                    fontWeight: 600,
+                    transition: "all 0.2s"
+                  }}
+                >
+                  Logout
+                </button>
+              </div>
+            )}
             <div style={{ display: "flex", alignItems: "center", gap: "8px", marginRight: "12px" }}>
               <span className="live-dot" />
               <span style={{ fontSize: "0.78rem", color: "var(--text-secondary)", fontWeight: 500 }}>Live Telemetry</span>
@@ -1048,7 +1152,87 @@ export default function DashboardPage() {
               </AnimatePresence>
             </div>
 
-            <div className="topnav-avatar">AD</div>
+            <div style={{ position: "relative" }}>
+              <div
+                className="topnav-avatar"
+                onClick={() => setUserMenuOpen(!userMenuOpen)}
+                style={{ cursor: "pointer", userSelect: "none" }}
+              >
+                {currentUser ? currentUser.email.substring(0, 2).toUpperCase() : "AD"}
+              </div>
+              <AnimatePresence>
+                {userMenuOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -8, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -8, scale: 0.95 }}
+                    transition={{ duration: 0.15 }}
+                    style={{
+                      position: "absolute",
+                      top: "calc(100% + 8px)",
+                      right: 0,
+                      width: "220px",
+                      background: "var(--bg-card)",
+                      border: "1px solid var(--border-medium)",
+                      borderRadius: "var(--radius-md)",
+                      boxShadow: "var(--shadow-lg), 0 4px 20px rgba(0,0,0,0.3)",
+                      padding: "12px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "10px",
+                      zIndex: 1000,
+                    }}
+                  >
+                    <div style={{ display: "flex", flexDirection: "column", borderBottom: "1px solid var(--border-subtle)", paddingBottom: "8px" }}>
+                      <span style={{ fontSize: "0.82rem", fontWeight: 700, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {currentUser?.email || "sameer@susalabs.in"}
+                      </span>
+                      <span style={{ fontSize: "0.68rem", color: "var(--accent-text)", fontWeight: 700, textTransform: "uppercase", marginTop: "2px" }}>
+                        {currentUser?.role === "super_admin" ? "Super Admin" : "Admin"}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setCurrentView("settings");
+                        setUserMenuOpen(false);
+                      }}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        color: "var(--text-secondary)",
+                        fontSize: "0.8rem",
+                        fontWeight: 500,
+                        textAlign: "left",
+                        cursor: "pointer",
+                        padding: "6px 0",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px"
+                      }}
+                    >
+                      ⚙️ Settings
+                    </button>
+                    <button
+                      onClick={handleLogout}
+                      style={{
+                        background: "rgba(239, 68, 68, 0.1)",
+                        border: "1px solid rgba(239, 68, 68, 0.2)",
+                        color: "#f87171",
+                        fontSize: "0.8rem",
+                        fontWeight: 600,
+                        borderRadius: "var(--radius-sm)",
+                        padding: "8px",
+                        cursor: "pointer",
+                        textAlign: "center",
+                        transition: "all 0.2s"
+                      }}
+                    >
+                      Log Out
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
         </header>
 
@@ -1724,7 +1908,7 @@ export default function DashboardPage() {
                 <main className="main-content">
                   <div className="greeting">
                     <h1>Administrator Settings</h1>
-                    <p>Configure telemetry reporting intervals (data arrival frequency) separately for Windows and macOS clients.</p>
+                    <p>Configure telemetry reporting intervals, log arrival frequencies, data retention duration, and manage administrators.</p>
                   </div>
 
                   <div className="card section-card" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
@@ -1744,6 +1928,90 @@ export default function DashboardPage() {
                     )}
 
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "24px" }}>
+
+                      {/* Global Settings Section */}
+                      <div style={{
+                        background: "var(--bg-input)",
+                        border: "1px solid var(--border-subtle)",
+                        borderRadius: "var(--radius-lg)",
+                        padding: "20px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "16px"
+                      }}>
+                        <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px", borderBottom: "1px solid var(--border-medium)", paddingBottom: "12px" }}>
+                          <span style={{ fontSize: "1.2rem" }}>⚙️</span> Global Telemetry & Policy
+                        </h3>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontWeight: 600, fontSize: "0.88rem" }}>Logs Arrival Frequency</span>
+                            <select
+                              className="console-select"
+                              value={settings.logIntervalMinutes}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value, 10);
+                                setSettings({
+                                  ...settings,
+                                  logIntervalMinutes: val
+                                });
+                              }}
+                            >
+                              <option value={1}>Every 1 Minute</option>
+                              <option value={10}>Every 10 Minutes</option>
+                              <option value={30}>Every 30 Minutes</option>
+                              <option value={60}>Every 60 Minutes</option>
+                            </select>
+                          </div>
+                          <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)" }}>How frequently clients submit log updates to the database.</span>
+                        </div>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontWeight: 600, fontSize: "0.88rem" }}>Data Retention Period</span>
+                            <select
+                              className="console-select"
+                              value={settings.dataRetentionDays}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value, 10);
+                                setSettings({
+                                  ...settings,
+                                  dataRetentionDays: val
+                                });
+                              }}
+                            >
+                              <option value={7}>7 Days</option>
+                              <option value={14}>14 Days</option>
+                              <option value={20}>20 Days</option>
+                              <option value={30}>30 Days</option>
+                              <option value={60}>60 Days</option>
+                              <option value={90}>90 Days</option>
+                            </select>
+                          </div>
+                          <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)" }}>Duration for keeping telemetry log documents on the system.</span>
+                        </div>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontWeight: 600, fontSize: "0.88rem" }}>Retention Clean Action</span>
+                            <select
+                              className="console-select"
+                              value={settings.retentionAction}
+                              onChange={(e) => {
+                                const val = e.target.value as "delete" | "archive";
+                                setSettings({
+                                  ...settings,
+                                  retentionAction: val
+                                });
+                              }}
+                            >
+                              <option value="delete">Delete Permanently</option>
+                              <option value="archive">Archive Logs</option>
+                            </select>
+                          </div>
+                          <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)" }}>Whether logs should be permanently purged or flagged as archived.</span>
+                        </div>
+                      </div>
 
                       {/* Windows Section */}
                       <div style={{
@@ -1851,6 +2119,90 @@ export default function DashboardPage() {
                       </button>
                     </div>
                   </div>
+
+                  {currentUser?.role === "super_admin" && (
+                    <div className="card section-card" style={{ display: "flex", flexDirection: "column", gap: "20px", marginTop: "24px" }}>
+                      <div className="section-header">
+                        <div className="section-title">
+                          <span>👥</span> Admin Management Settings
+                        </div>
+                        <button
+                          className="console-btn"
+                          onClick={() => setShowCreateAdminModal(true)}
+                          style={{ padding: "8px 16px", fontSize: "0.8rem" }}
+                        >
+                          + Create New Admin
+                        </button>
+                      </div>
+
+                      <div className="table-wrapper">
+                        <table className="hosts-table" style={{ fontSize: "0.82rem" }}>
+                          <thead>
+                            <tr>
+                              <th>Admin Email</th>
+                              <th>Assigned Machines</th>
+                              <th>Created At</th>
+                              <th>Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {adminsList.length === 0 ? (
+                              <tr>
+                                <td colSpan={4} style={{ textAlign: "center", padding: "20px", color: "var(--text-secondary)" }}>
+                                  No additional administrators created yet.
+                                </td>
+                              </tr>
+                            ) : (
+                              adminsList.map((adm) => (
+                                <tr key={adm._id}>
+                                  <td style={{ fontWeight: 600, color: "var(--accent-text)" }}>{adm.email}</td>
+                                  <td>
+                                    {adm.assignedMachines && adm.assignedMachines.length > 0 ? (
+                                      <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                                        {adm.assignedMachines.map((m: string) => (
+                                          <span key={m} style={{
+                                            fontSize: "0.7rem", fontWeight: 600, padding: "2px 8px",
+                                            background: "var(--bg-input)", border: "1px solid var(--border-medium)",
+                                            borderRadius: "var(--radius-full)", color: "var(--text-primary)"
+                                          }}>{m}</span>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <span style={{ color: "var(--text-secondary)", fontSize: "0.76rem" }}>All Machines (None assigned)</span>
+                                    )}
+                                  </td>
+                                  <td>{new Date(adm.createdAt).toLocaleDateString()}</td>
+                                  <td>
+                                    <div style={{ display: "flex", gap: "10px" }}>
+                                      <button
+                                        onClick={() => setEditingAdmin(adm)}
+                                        style={{ background: "none", border: "none", color: "var(--accent-text)", fontWeight: 600, cursor: "pointer", padding: 0 }}
+                                      >
+                                        Edit
+                                      </button>
+                                      <button
+                                        onClick={async () => {
+                                          if (confirm(`Are you sure you want to delete admin ${adm.email}?`)) {
+                                            const res = await fetch(`/api/admin/users/${adm._id}`, { method: "DELETE" });
+                                            if (res.ok) {
+                                              fetchAdmins();
+                                            }
+                                          }
+                                        }}
+                                        style={{ background: "none", border: "none", color: "#f87171", fontWeight: 600, cursor: "pointer", padding: 0 }}
+                                      >
+                                        Delete
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                 </main>
               )}
             </>
@@ -2647,6 +2999,167 @@ export default function DashboardPage() {
                 </div>
 
               </div>
+            </motion.div>
+          </div>
+        )}
+        {showCreateAdminModal && (
+          <div className="modal-overlay" onClick={() => setShowCreateAdminModal(false)}>
+            <motion.div
+              className="modal-card"
+              onClick={(e) => e.stopPropagation()}
+              style={{ maxWidth: "500px" }}
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              transition={{ duration: 0.2 }}
+            >
+              <div className="modal-header">
+                <h2 style={{ fontSize: "1.1rem", fontWeight: 700, margin: 0 }}>Create Admin Account</h2>
+                <button className="modal-close" onClick={() => setShowCreateAdminModal(false)}>×</button>
+              </div>
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                const res = await fetch("/api/admin/users", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    email: newAdminEmail,
+                    password: newAdminPassword,
+                    assignedMachines: newAdminAssigned
+                  })
+                });
+                if (res.ok) {
+                  setNewAdminEmail("");
+                  setNewAdminPassword("");
+                  setNewAdminAssigned([]);
+                  setShowCreateAdminModal(false);
+                  fetchAdmins();
+                } else {
+                  const data = await res.json();
+                  alert(data.error || "Failed to create admin");
+                }
+              }} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "0.78rem", fontWeight: 600 }}>Email Address</label>
+                  <input
+                    type="email"
+                    className="console-select"
+                    style={{ padding: "10px", width: "100%" }}
+                    placeholder="e.g. admin@susalabs.in"
+                    value={newAdminEmail}
+                    onChange={(e) => setNewAdminEmail(e.target.value)}
+                    required
+                  />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "0.78rem", fontWeight: 600 }}>Password</label>
+                  <input
+                    type="password"
+                    className="console-select"
+                    style={{ padding: "10px", width: "100%" }}
+                    placeholder="Minimum 8 characters"
+                    value={newAdminPassword}
+                    onChange={(e) => setNewAdminPassword(e.target.value)}
+                    required
+                  />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "0.78rem", fontWeight: 600 }}>Assign Machines</label>
+                  <div style={{ maxHeight: "150px", overflowY: "auto", border: "1px solid var(--border-medium)", padding: "10px", borderRadius: "var(--radius-sm)", background: "var(--bg-input)", display: "flex", flexDirection: "column", gap: "8px" }}>
+                    {hosts.map(h => (
+                      <label key={h.nodeKey} style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontSize: "0.8rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={newAdminAssigned.includes(h.nodeKey)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setNewAdminAssigned([...newAdminAssigned, h.nodeKey]);
+                            } else {
+                              setNewAdminAssigned(newAdminAssigned.filter(k => k !== h.nodeKey));
+                            }
+                          }}
+                        />
+                        {h.employeeName || h.hostname} ({h.platform})
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <button type="submit" className="console-btn" style={{ width: "100%", marginTop: "10px" }}>
+                  Create Administrator
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+
+        {editingAdmin && (
+          <div className="modal-overlay" onClick={() => setEditingAdmin(null)}>
+            <motion.div
+              className="modal-card"
+              onClick={(e) => e.stopPropagation()}
+              style={{ maxWidth: "500px" }}
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              transition={{ duration: 0.2 }}
+            >
+              <div className="modal-header">
+                <h2 style={{ fontSize: "1.1rem", fontWeight: 700, margin: 0 }}>Edit Assigned Machines</h2>
+                <button className="modal-close" onClick={() => setEditingAdmin(null)}>×</button>
+              </div>
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                const res = await fetch(`/api/admin/users/${editingAdmin._id}`, {
+                  method: "PUT",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    assignedMachines: editingAdmin.assignedMachines
+                  })
+                });
+                if (res.ok) {
+                  setEditingAdmin(null);
+                  fetchAdmins();
+                } else {
+                  const data = await res.json();
+                  alert(data.error || "Failed to update admin");
+                }
+              }} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "0.78rem", fontWeight: 600 }}>Admin Email</label>
+                  <div style={{ fontSize: "0.9rem", color: "var(--accent-text)", fontWeight: 600 }}>{editingAdmin.email}</div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "0.78rem", fontWeight: 600 }}>Assign Machines</label>
+                  <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid var(--border-medium)", padding: "10px", borderRadius: "var(--radius-sm)", background: "var(--bg-input)", display: "flex", flexDirection: "column", gap: "8px" }}>
+                    {hosts.map(h => (
+                      <label key={h.nodeKey} style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontSize: "0.8rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={editingAdmin.assignedMachines?.includes(h.nodeKey)}
+                          onChange={(e) => {
+                            const current = editingAdmin.assignedMachines || [];
+                            if (e.target.checked) {
+                              setEditingAdmin({
+                                ...editingAdmin,
+                                assignedMachines: [...current, h.nodeKey]
+                              });
+                            } else {
+                              setEditingAdmin({
+                                ...editingAdmin,
+                                assignedMachines: current.filter((k: string) => k !== h.nodeKey)
+                              });
+                            }
+                          }}
+                        />
+                        {h.employeeName || h.hostname} ({h.platform})
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <button type="submit" className="console-btn" style={{ width: "100%", marginTop: "10px" }}>
+                  Save Machine Assignments
+                </button>
+              </form>
             </motion.div>
           </div>
         )}
