@@ -61,6 +61,43 @@ if (-not $Department)   { $Department   = Read-Host "  Department    (e.g. Engin
 
 Write-Host "  + Employee: $EmployeeName ($EmployeeID) - $Department" -ForegroundColor Green
 
+# --- Pre-Step: Kill ALL existing osqueryd processes (prevent duplicate/lock issues) ---
+Write-Host ""
+Write-Host "  [PRE-STEP] Cleaning up existing osquery processes..." -ForegroundColor Yellow
+
+# Stop the Windows service first (graceful)
+Stop-Service -Name "osqueryd" -Force -ErrorAction SilentlyContinue
+
+# Force-kill ALL osqueryd processes (handles manually started ones too)
+$existing = Get-Process -Name "osqueryd" -ErrorAction SilentlyContinue
+if ($existing) {
+    $existing | ForEach-Object {
+        Write-Host "  + Killing osqueryd PID $($_.Id)..." -ForegroundColor Gray
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 2
+    Write-Host "  + All osqueryd processes terminated" -ForegroundColor Green
+} else {
+    Write-Host "  + No existing osqueryd processes found" -ForegroundColor Gray
+}
+
+# Kill any existing activity_monitor.ps1 PowerShell instances
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' AND CommandLine LIKE '%activity_monitor.ps1%'" | Invoke-CimMethod -MethodName Terminate | Out-Null
+
+# Remove DB lock files to prevent SQLite corruption on next start
+$dbFiles = @(
+    "C:\ProgramData\osquery\osquery.db",
+    "C:\ProgramData\osquery\osquery.db-wal",
+    "C:\ProgramData\osquery\osquery.db-shm"
+)
+foreach ($f in $dbFiles) {
+    if (Test-Path $f) {
+        Remove-Item $f -Force -ErrorAction SilentlyContinue
+        Write-Host "  + Removed: $f" -ForegroundColor Gray
+    }
+}
+Write-Host "  + Cleanup complete" -ForegroundColor Green
+
 # --- Step 3: Create Directories & Files ---
 Write-Host ""
 Write-Host "  [STEP 3/5] Creating configuration files..." -ForegroundColor Yellow
@@ -150,7 +187,7 @@ $FlagsContent = @"
 
 # Refresh frequencies
 --config_tls_refresh=60
---logger_tls_period=$IntervalSecs
+--logger_tls_period=60
 "@
 
 if ($isLocal) {
@@ -401,34 +438,7 @@ while ($true) {
             }
         }
 
-        # === Config Sync: every 60 seconds (30 loops * 2s), fetch server interval and update osquery flags ===
-        if ($loopCount % 30 -eq 0 -and $loopCount -gt 0) {
-            try {
-                $cfgPath = "C:\ProgramData\osquery\employee.json"
-                $flagsPath = "C:\ProgramData\osquery\osquery.flags"
-                if ((Test-Path $cfgPath) -and (Test-Path $flagsPath)) {
-                    $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
-                    $srv = $cfg.server_address
-                    if ($srv) {
-                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                        $resp = Invoke-RestMethod -Uri "http://$srv/api/osquery/interval" -UseBasicParsing -TimeoutSec 5
-                        if ($resp -and $resp.logIntervalSeconds) {
-                            $newPeriod = $resp.logIntervalSeconds
-                            $flagsContent = Get-Content $flagsPath -Raw
-                            if ($flagsContent -match '--logger_tls_period=(\d+)') {
-                                $currentPeriod = [int]$Matches[1]
-                                if ($currentPeriod -ne $newPeriod) {
-                                    $updatedFlags = $flagsContent -replace '--logger_tls_period=\d+', "--logger_tls_period=$newPeriod"
-                                    [System.IO.File]::WriteAllText($flagsPath, $updatedFlags)
-                                    # Restart osqueryd service to pick up new interval
-                                    Restart-Service osqueryd -Force -ErrorAction SilentlyContinue
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch {}
-        }
+        # Config sync block removed - logger_tls_period is permanently set to 60s for instant uploads.
 
         $loopCount++
     } catch {}
