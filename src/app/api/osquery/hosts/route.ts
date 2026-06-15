@@ -3,6 +3,7 @@ import { ActivityTracker } from "@/lib/activityTracker";
 import { verifyToken } from "@/lib/auth";
 import User from "@/lib/models/User";
 import connectDB from "@/lib/db";
+import { SettingsManager } from "@/lib/settings";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +22,9 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const registry = ActivityTracker.getActiveRegistry();
+    const settings = await SettingsManager.getSettings();
+    const intervalSecs = (settings.logIntervalMinutes || 10) * 60;
+    const registry = ActivityTracker.getActiveRegistry(intervalSecs);
 
     // Super admin has visibility to all enrolled endpoints
     if (decoded.role === "super_admin") {

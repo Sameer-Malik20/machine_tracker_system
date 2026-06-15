@@ -13,6 +13,7 @@ This project is an enterprise-grade solution designed to monitor 500+ remote wor
 4. [VPS Deployment Guide (Next.js Server)](#4-vps-deployment-guide-nextjs-server)
 5. [Local Development & Quick Testing Guide](#5-local-development--quick-testing-guide)
 6. [Technology Stack & Architecture Decisions](#6-technology-stack--architecture-decisions)
+7. [Agent Telemetry & Data Collection Details (install-agent.ps1)](#7-agent-telemetry--data-collection-details-install-agentps1)
 
 ---
 
@@ -292,4 +293,68 @@ This section provides an overview of the core technologies used in this project,
   - *Browser History SQLite Bypass*: Active browsers (Google Chrome, MS Edge) hold locks on their history SQLite files. The installer implements a stream-based FileStream reader with `ReadWrite` sharing configuration to copy browser databases on the fly without closing active browsers.
 - **Python Telemetry Simulator (`test-agent.py`)**:
   - *Why*: Testing TLS APIs locally without real Osquery binaries or HTTPS proxy configuration can be slow. The Python simulator mimics the full TLS enrollment, config handshake, and payload logging behavior for easy API debugging on any platform.
+
+---
+
+## 7. Agent Telemetry & Data Collection Details (install-agent.ps1)
+
+The telemetry tracking agent utilizes a hybrid client monitoring design consisting of the official **Osquery Daemon (`osqueryd`)** running as a Windows Service, and a lightweight, hidden background session utility script **(`activity_monitor.ps1`)** running in the active user session. 
+
+Here is a step-by-step breakdown of how data is fetched, processed, and transmitted back to the Next.js server:
+
+### ⚙️ Installation & Architecture Components
+When `install-agent.ps1` runs on a Windows host under local Administrator privileges, it configures:
+1. **Filesystem Workspace**: Creates `C:\ProgramData\osquery` and places credential/identifying configurations:
+   - `enroll_secret`: Private secret file containing authorization credentials.
+   - `employee.json`: Metadata linking telemetry to the employee (`employee_name`, `employee_id`, `email`, `department`).
+2. **Osquery Service Integration**:
+   - Generates the `osquery.flags` configuration.
+   - Deletes prior instances and registers a new **Osquery Windows Service** (`osqueryd`) configured for automatic system-level boot startup and auto-recovery.
+3. **Background Activity Monitor Launcher**:
+   - Generates the session-level script `C:\ProgramData\osquery\activity_monitor.ps1`.
+   - Creates a launcher script `Susalabs-ActivityMonitor.vbs` in the user's **Windows Startup folder** (`shell:startup`).
+   - This VBScript silently launches `activity_monitor.ps1` using a completely hidden execution shell (`-WindowStyle Hidden` and execution bypass), starting automatically when the user logs in without showing any command console.
+
+---
+
+### 📊 Telemetry Data Harvesting Mechanisms
+
+Data is harvested continuously via two synchronized mechanisms:
+
+#### A. Background Session Monitor (`activity_monitor.ps1`)
+Runs dynamically inside the active user session, looping every 2 seconds, and executes low-level system APIs to extract data that Osquery cannot gather directly:
+1. **User Active/Idle Status**:
+   - Compiles a native C# interop block to make Win32 API calls (`GetLastInputInfo` from `user32.dll`).
+   - Computes idle time in seconds by evaluating system ticks against the timestamp of the user's last keyboard/mouse action.
+   - Automatically tags status as **Idle** if inactivity exceeds 60 seconds; otherwise registers as **Active**.
+2. **Active Foreground Application Tracking**:
+   - Uses Win32 P/Invoke (`GetForegroundWindow` and `GetWindowText` from `user32.dll`) to retrieve the handle and window title of the foreground active application.
+   - Maps the window handle to its running process name.
+3. **Active Web URL Extraction**:
+   - For popular web browsers (Chrome, Edge, Brave, Firefox), it uses the **Windows UI Automation Framework** (`UIAutomationClient.dll`) to search the browser interface hierarchy for the address bar (`Edit` control type) and extract the exact active URL in real-time.
+4. **Browser History Database Copying**:
+   - Since active browsers lock SQLite database files (especially in SQLite WAL mode), it copies the browser history files every 10 seconds to `C:\ProgramData\osquery\` (naming them `chrome_history.db` and `edge_history.db`).
+   - Replicates **all three required SQLite transaction files** (`History`, `History-wal`, `History-shm`).
+   - Uses a secure stream copy fallback with shared read/write streams (`[System.IO.FileShare]::ReadWrite`) and administrative `robocopy /B` to read files without forcing active browser windows to close.
+5. **Registry Telemetry Output**:
+   - Writes all gathered session parameters (Idle seconds, active window title, URL, employee status, and identity meta) to the local Windows registry path: `HKCU:\Software\Monetra\Activity\`.
+   - Appends window changes into the `WindowHistory` subkey, maintaining a rolling log of the last 50 changes.
+
+#### B. Osquery Daemon (`osqueryd`)
+Osquery receives its telemetry queries dynamically from the Next.js server configuration Pack `/api/osquery/config`. It executes standard SQLite-like queries on client systems:
+1. **Native OS Information**: Queries system processes, memory usage, networks sockets, and general system diagnostics using default osquery tables (`processes`, `system_info`, `process_open_sockets`).
+2. **Registry Mapping**: Maps and polls the custom registry path (`HKEY_USERS\...\Software\Monetra\Activity`) populated by the activity monitor script to gather employee presence, window title, and status.
+3. **Auto Table Construction (ATC)**:
+   - Evaluates browser history from the database copies using Osquery's native **Auto Table Construction (ATC)** virtualization.
+   - Generates virtual tables (`chrome_history_atc` and `edge_history_atc`) backed directly by the copied database files, allowing standard SQL queries like:
+     ```sql
+     SELECT url, title, last_visit_time FROM chrome_history_atc ORDER BY last_visit_time DESC LIMIT 20;
+     ```
+
+---
+
+### 🌐 Data Syncing & Server Communication
+- **Telemetry Transmission**: Osquery packages all query outputs into formatted JSON payload buffers and posts them to `/api/osquery/log` over HTTPS/TLS at intervals configured by the server.
+- **Offline Caching**: If the client is disconnected from the internet, Osquery stores the logged payloads inside its local **RocksDB database**. Once a connection is re-established, it automatically flushes the logs back to the server in order.
+- **Dynamic Configuration Sync**: The activity monitor polls `http://$ServerAddress/api/osquery/interval` every 60 seconds to retrieve server-configured report intervals, updates the local `osquery.flags` with the new logger TLS period, and restarts the service if needed.
 

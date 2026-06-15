@@ -31,6 +31,17 @@ interface Host {
   recentQueries: QueryLog[];
   latestResults?: Record<string, Record<string, string>[]>;
   statusHistory?: StateTransition[];
+  latestCheckinDebug?: {
+    selectedFrequencyMinutes: number;
+    selectedFrequencySeconds: number;
+    timeSinceLastCheckinSeconds: number | string;
+    timeSinceLastSaveSeconds: number | string;
+    receivedQueriesBreakdown: Record<string, number>;
+    missingQueries: string[];
+    completeness: string;
+    rateLimitedDroppedCount: number;
+    timestamp: string;
+  };
 }
 
 interface NotificationItem {
@@ -133,9 +144,14 @@ export default function DashboardPage() {
     if (!notifOpen) return;
     const handler = (e: MouseEvent) => {
       const btn = document.getElementById("notif-bell-btn");
-      if (btn && !btn.contains(e.target as Node)) {
-        setNotifOpen(false);
+      const dropdown = document.querySelector(".notif-dropdown");
+      if (
+        (btn && btn.contains(e.target as Node)) ||
+        (dropdown && dropdown.contains(e.target as Node))
+      ) {
+        return;
       }
+      setNotifOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -146,9 +162,14 @@ export default function DashboardPage() {
     if (!userMenuOpen) return;
     const handler = (e: MouseEvent) => {
       const avatar = document.querySelector(".topnav-avatar");
-      if (avatar && !avatar.contains(e.target as Node)) {
-        setUserMenuOpen(false);
+      const menu = document.querySelector(".profile-menu-dropdown");
+      if (
+        (avatar && avatar.contains(e.target as Node)) ||
+        (menu && menu.contains(e.target as Node))
+      ) {
+        return;
       }
+      setUserMenuOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -335,6 +356,17 @@ export default function DashboardPage() {
       if (res.ok) {
         setSettingsStatus("success: Settings saved successfully!");
         setTimeout(() => setSettingsStatus(null), 3000);
+
+        // Force an immediate fetch of hosts so the UI receives the updated settings frequency instantly
+        try {
+          const hostsRes = await fetch("/api/osquery/hosts");
+          if (hostsRes.ok) {
+            const data = await hostsRes.json();
+            setHosts(data);
+          }
+        } catch (hostsErr) {
+          console.error("Failed to instantly refetch hosts:", hostsErr);
+        }
       } else {
         setSettingsStatus("error: Failed to save settings.");
       }
@@ -955,23 +987,6 @@ export default function DashboardPage() {
                     {currentUser.role === "super_admin" ? "Super Admin" : "Admin"}
                   </span>
                 </div>
-                <button
-                  className="btn"
-                  onClick={handleLogout}
-                  style={{
-                    padding: "6px 12px",
-                    background: "rgba(239, 68, 68, 0.1)",
-                    color: "#f87171",
-                    border: "1px solid rgba(239, 68, 68, 0.2)",
-                    borderRadius: "8px",
-                    cursor: "pointer",
-                    fontSize: "0.76rem",
-                    fontWeight: 600,
-                    transition: "all 0.2s"
-                  }}
-                >
-                  Logout
-                </button>
               </div>
             )}
             <div style={{ display: "flex", alignItems: "center", gap: "8px", marginRight: "12px" }}>
@@ -1011,6 +1026,7 @@ export default function DashboardPage() {
               <AnimatePresence>
                 {notifOpen && (
                   <motion.div
+                    className="notif-dropdown"
                     initial={{ opacity: 0, y: -8, scale: 0.95 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: -8, scale: 0.95 }}
@@ -1163,6 +1179,7 @@ export default function DashboardPage() {
               <AnimatePresence>
                 {userMenuOpen && (
                   <motion.div
+                    className="profile-menu-dropdown"
                     initial={{ opacity: 0, y: -8, scale: 0.95 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={{ opacity: 0, y: -8, scale: 0.95 }}
@@ -1927,7 +1944,7 @@ export default function DashboardPage() {
                       </div>
                     )}
 
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "24px" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
 
                       {/* Global Settings Section */}
                       <div style={{
@@ -1937,7 +1954,10 @@ export default function DashboardPage() {
                         padding: "20px",
                         display: "flex",
                         flexDirection: "column",
-                        gap: "16px"
+                        gap: "16px",
+                        maxWidth: "600px",
+                        margin: "0 auto",
+                        width: "100%"
                       }}>
                         <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px", borderBottom: "1px solid var(--border-medium)", paddingBottom: "12px" }}>
                           <span style={{ fontSize: "1.2rem" }}>⚙️</span> Global Telemetry & Policy
@@ -1957,13 +1977,15 @@ export default function DashboardPage() {
                                 });
                               }}
                             >
-                              <option value={1}>Every 1 Minute</option>
-                              <option value={10}>Every 10 Minutes</option>
-                              <option value={30}>Every 30 Minutes</option>
-                              <option value={60}>Every 60 Minutes</option>
+                              <option value={1}>1 Minute (Testing)</option>
+                              <option value={5}>5 Minutes</option>
+                              <option value={10}>10 Minutes</option>
+                              <option value={15}>15 Minutes</option>
+                              <option value={30}>30 Minutes</option>
+                              <option value={60}>60 Minutes (1 Hour)</option>
                             </select>
                           </div>
-                          <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)" }}>How frequently clients submit log updates to the database.</span>
+                          <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)" }}>Select how frequently the endpoint agent sends monitoring logs to the server.</span>
                         </div>
 
                         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -2012,101 +2034,6 @@ export default function DashboardPage() {
                           <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)" }}>Whether logs should be permanently purged or flagged as archived.</span>
                         </div>
                       </div>
-
-                      {/* Windows Section */}
-                      <div style={{
-                        background: "var(--bg-input)",
-                        border: "1px solid var(--border-subtle)",
-                        borderRadius: "var(--radius-lg)",
-                        padding: "20px",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "16px"
-                      }}>
-                        <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px", borderBottom: "1px solid var(--border-medium)", paddingBottom: "12px" }}>
-                          <span style={{ fontSize: "1.2rem" }}>⊞</span> Windows Endpoints
-                        </h3>
-
-                        {/* Windows Fields */}
-                        {[
-                          { label: "Running Processes", key: "processInterval" as const, desc: "Frequencies of active applications checkin." },
-                          { label: "Hardware Specs", key: "performanceInterval" as const, desc: "CPU, memory metadata report cycle." },
-                          { label: "Network Sockets", key: "networkInterval" as const, desc: "Open network ports scanner." },
-                          { label: "Keyboard & Mouse Status", key: "activityInterval" as const, desc: "User presence activity checks." }
-                        ].map((item) => (
-                          <div key={item.key} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                              <span style={{ fontWeight: 600, fontSize: "0.88rem" }}>{item.label}</span>
-                              <select
-                                className="console-select"
-                                value={settings.windows[item.key]}
-                                onChange={(e) => {
-                                  const val = parseInt(e.target.value, 10);
-                                  setSettings({
-                                    ...settings,
-                                    windows: { ...settings.windows, [item.key]: val }
-                                  });
-                                }}
-                              >
-                                <option value={60}>1 Minute (Fast)</option>
-                                <option value={300}>5 Minutes</option>
-                                <option value={600}>10 Minutes</option>
-                                <option value={1800}>30 Minutes</option>
-                                <option value={3600}>60 Minutes (Slow)</option>
-                              </select>
-                            </div>
-                            <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)" }}>{item.desc}</span>
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* macOS Section */}
-                      <div style={{
-                        background: "var(--bg-input)",
-                        border: "1px solid var(--border-subtle)",
-                        borderRadius: "var(--radius-lg)",
-                        padding: "20px",
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: "16px"
-                      }}>
-                        <h3 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px", borderBottom: "1px solid var(--border-medium)", paddingBottom: "12px" }}>
-                          <span style={{ fontSize: "1.2rem" }}>⌘</span> macOS Endpoints
-                        </h3>
-
-                        {/* Mac Fields */}
-                        {[
-                          { label: "Running Processes", key: "processInterval" as const, desc: "Frequencies of active applications checkin." },
-                          { label: "Hardware Specs", key: "performanceInterval" as const, desc: "CPU, memory metadata report cycle." },
-                          { label: "Network Sockets", key: "networkInterval" as const, desc: "Open network ports scanner." },
-                          { label: "Keyboard & Mouse Status", key: "activityInterval" as const, desc: "User presence activity checks." }
-                        ].map((item) => (
-                          <div key={item.key} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                              <span style={{ fontWeight: 600, fontSize: "0.88rem" }}>{item.label}</span>
-                              <select
-                                className="console-select"
-                                value={settings.mac[item.key]}
-                                onChange={(e) => {
-                                  const val = parseInt(e.target.value, 10);
-                                  setSettings({
-                                    ...settings,
-                                    mac: { ...settings.mac, [item.key]: val }
-                                  });
-                                }}
-                              >
-                                <option value={60}>1 Minute (Fast)</option>
-                                <option value={300}>5 Minutes</option>
-                                <option value={600}>10 Minutes</option>
-                                <option value={1800}>30 Minutes</option>
-                                <option value={3600}>60 Minutes (Slow)</option>
-                              </select>
-                            </div>
-                            <span style={{ fontSize: "0.74rem", color: "var(--text-secondary)" }}>{item.desc}</span>
-                          </div>
-                        ))}
-                      </div>
-
                     </div>
 
                     <div style={{ display: "flex", justifyContent: "flex-end", borderTop: "1px solid var(--border-medium)", paddingTop: "16px" }}>
@@ -2723,7 +2650,61 @@ export default function DashboardPage() {
                   {/* TAB 4: Check-in Logs */}
                   {activeTab === "logs" && (
                     <div>
-                      <div className="detail-section-label">Log Check-in History Stream (Real)</div>
+                      <div className="detail-section-label">Log Check-in History Stream (Real) - Data arrives every {settings.logIntervalMinutes} minutes</div>
+
+                      {inspectingHost.latestCheckinDebug && (
+                        <div className="detail-panel" style={{
+                          marginBottom: "16px",
+                          border: "1px dashed var(--border-medium)",
+                          padding: "16px",
+                          borderRadius: "8px",
+                          backgroundColor: "var(--bg-light)",
+                          fontFamily: "monospace",
+                          fontSize: "0.85rem",
+                          lineHeight: "1.5"
+                        }}>
+                          {/* <div style={{ fontWeight: 700, color: "var(--accent-cyan)", marginBottom: "8px", borderBottom: "1px solid var(--border-medium)", paddingBottom: "4px" }}>
+                            🔍 REAL-TIME ARRIVAL DEBUG INFO
+                          </div>
+                          <div><strong>Selected Log Interval:</strong> {inspectingHost.latestCheckinDebug.selectedFrequencyMinutes}m ({inspectingHost.latestCheckinDebug.selectedFrequencySeconds}s)</div>
+                          <div><strong>Time Since Last Check-in:</strong> {inspectingHost.latestCheckinDebug.timeSinceLastCheckinSeconds}</div>
+                          <div><strong>Time Since Last DB Log Save:</strong> {inspectingHost.latestCheckinDebug.timeSinceLastSaveSeconds}</div>
+                          <div style={{ marginTop: "6px" }}>
+                            <strong>Received Queries Breakdown:</strong>
+                            <div style={{ paddingLeft: "12px", color: "var(--text-secondary)" }}>
+                              {Object.entries(inspectingHost.latestCheckinDebug.receivedQueriesBreakdown).length > 0 ? (
+                                Object.entries(inspectingHost.latestCheckinDebug.receivedQueriesBreakdown).map(([q, count]) => (
+                                  <div key={q}>• {q}: {count} rows</div>
+                                ))
+                              ) : (
+                                <div>(None)</div>
+                              )}
+                            </div>
+                          </div> */}
+                          {/* <div style={{ marginTop: "6px" }}>
+                            <strong>Missing Expected Queries:</strong>
+                            <div style={{ paddingLeft: "12px", color: "var(--text-secondary)" }}>
+                              {inspectingHost.latestCheckinDebug.missingQueries.length > 0 ? (
+                                <span style={{ color: "var(--accent-orange)" }}>{inspectingHost.latestCheckinDebug.missingQueries.join(", ")}</span>
+                              ) : (
+                                <span style={{ color: "var(--accent-green)" }}>None (All expected queries received)</span>
+                              )}
+                            </div>
+                          </div> */}
+                          <div style={{ marginTop: "8px", paddingTop: "8px", borderTop: "1px solid var(--border-medium)" }}>
+                            <strong>Completeness Status:</strong> <span style={{
+                              fontWeight: 700,
+                              color: inspectingHost.latestCheckinDebug.completeness.includes("PROPER") ? "var(--accent-green)" : "var(--accent-orange)"
+                            }}>{inspectingHost.latestCheckinDebug.completeness}</span>
+                          </div>
+                          {inspectingHost.latestCheckinDebug.rateLimitedDroppedCount > 0 && (
+                            <div style={{ color: "var(--accent-orange)", marginTop: "4px" }}>
+                              ⚠️ <strong>Rate Limiter:</strong> Dropped {inspectingHost.latestCheckinDebug.rateLimitedDroppedCount} rows that arrived too early.
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       {inspectingHost.recentQueries?.length > 0 ? (
                         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                           {inspectingHost.recentQueries.map((query, idx) => (

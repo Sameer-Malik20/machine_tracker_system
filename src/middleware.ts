@@ -11,6 +11,7 @@ export function middleware(request: NextRequest) {
     pathname.startsWith("/api/osquery/enroll") ||
     pathname.startsWith("/api/osquery/config") ||
     pathname.startsWith("/api/osquery/log") ||
+    pathname.startsWith("/api/osquery/interval") ||
     pathname.startsWith("/_next/") ||
     pathname.includes("favicon.ico") ||
     pathname.includes("logo.jpeg");

@@ -8,7 +8,7 @@ export interface IPlatformSettings {
 }
 
 export interface IAdminSettings extends Document {
-  logIntervalMinutes: number; // 1, 10, 30, 60
+  logIntervalMinutes: number; // 1, 5, 10, 30, 60
   dataRetentionDays: number; // e.g. 30 days
   retentionAction: "delete" | "archive"; // "delete" or "archive"
   windows: IPlatformSettings;

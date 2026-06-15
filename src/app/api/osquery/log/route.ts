@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { CONFIG } from "@/lib/config";
 import { DatabaseSimulator, OsqueryLogEntry, OsqueryPayload } from "@/lib/db";
-import { ActivityTracker } from "@/lib/activityTracker";
+import { ActivityTracker, activityRegistry } from "@/lib/activityTracker";
+import { SettingsManager } from "@/lib/settings";
+import { connectDB } from "@/lib/db";
+import EnrolledNode from "@/lib/models/EnrolledNode";
 
 // Set compile configurations
 export const dynamic = "force-dynamic";
@@ -45,17 +48,32 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ node_invalid: true }, { status: 200 });
     }
 
-    // Force re-enrollment if the node key is not recognized in memory (e.g. server restarted)
+    // Force re-enrollment if the node key is not recognized in memory — but first try DB restore
     if (!ActivityTracker.hasNode(nodeKey)) {
-      console.warn(`[API - Log] Unrecognized node key: ${nodeKey}. Triggering re-enrollment.`);
-      return NextResponse.json({ node_invalid: true }, { status: 200 });
+      let restored = false;
+      try {
+        await connectDB();
+        const persisted = await EnrolledNode.findOne({ nodeKey });
+        if (persisted) {
+          ActivityTracker.registerNode(nodeKey, persisted.hostname, persisted.platform);
+          restored = true;
+        }
+      } catch (_) { }
+      if (!restored) {
+        console.warn(`[API - Log] Unrecognized node key: ${nodeKey}. Triggering re-enrollment.`);
+        return NextResponse.json({ node_invalid: true }, { status: 200 });
+      }
     }
+
+    // Fetch settings to check configured log arrival frequency
+    const settings = await SettingsManager.getSettings();
+    const intervalSecs = (settings.logIntervalMinutes || 10) * 60;
 
     // Parse status vs result logs. We are tracking client activity using result logs.
     if (logType === "status") {
       console.info(`[API - Log] Received status log from ${nodeKey}`);
       // Register heartbeat from status query
-      ActivityTracker.processLogCheckin(nodeKey, "status_log", logs.length);
+      ActivityTracker.processLogCheckin(nodeKey, "status_log", logs.length, intervalSecs);
       return NextResponse.json({ node_invalid: false });
     }
 
@@ -108,22 +126,155 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Process activity calculations (e.g. process query tracker)
-    // Osquery submits telemetry results periodically. We track these intervals.
-    if (validLogs.length > 0) {
-      ActivityTracker.processLogCheckinWithLogs(nodeKey, validLogs, hostIdentifier);
-    } else {
-      // Log checkin without logs (empty list is sent by client when no diff changes occur)
-      ActivityTracker.processLogCheckinWithLogs(nodeKey, [], hostIdentifier);
+    const hostState = activityRegistry.get(nodeKey);
+    const now = new Date();
+
+    // Custom console debug logging requested by user to inspect dynamic intervals and completeness
+    const hostname = hostState?.hostname || hostIdentifier || "unknown_host";
+    const platform = hostState?.platform || "unknown";
+    const timeSinceLastHeartbeat = hostState?.lastHeartbeat
+      ? `${Math.round((now.getTime() - hostState.lastHeartbeat.getTime()) / 1000)}s`
+      : "N/A (First heartbeat)";
+    const timeSinceLastLogSave = hostState?.lastLogSaveTime
+      ? `${Math.round((now.getTime() - hostState.lastLogSaveTime.getTime()) / 1000)}s`
+      : "N/A (First log save)";
+
+    const EXPECTED_QUERIES = [
+      "running_processes",
+      "system_performance",
+      "active_network_sockets",
+      "user_activity",
+      "chrome_history",
+      "edge_history",
+      "window_history",
+      "active_window"
+    ];
+
+    const incomingQueryCounts: Record<string, number> = {};
+    for (const entry of validLogs) {
+      incomingQueryCounts[entry.name] = (incomingQueryCounts[entry.name] || 0) + 1;
     }
 
-    // Asynchronously dispatch database insertions to keep Next.js execution thread unblocked and super-fast
-    const payload: OsqueryPayload = { node_key: nodeKey, log_type: logType, data: validLogs };
-    
-    // Non-blocking invocation
-    DatabaseSimulator.persistLogs(payload).catch((err) => {
-      console.error(`[API - Log] Asynchronous db write failure for node ${nodeKey}:`, err);
-    });
+    const receivedQueries = Object.keys(incomingQueryCounts);
+    const missingQueries = EXPECTED_QUERIES.filter(q => !incomingQueryCounts[q]);
+    const completeness = missingQueries.length === 0
+      ? "PROPER / COMPLETE (All expected telemetry queries present)"
+      : `PARTIAL (Missing expected queries: ${missingQueries.join(", ")})`;
+
+    console.log(`
+================================================================================
+[DEBUG - TELEMETRY ARRIVAL]
+Host: ${hostname} (Node Key: ${nodeKey}, Platform: ${platform})
+Selected Logs Arrival Frequency: ${settings.logIntervalMinutes}m (${intervalSecs}s)
+
+Time Elapsed:
+- Since last check-in: ${timeSinceLastHeartbeat} (Expected ~${intervalSecs}s)
+- Since last DB log save: ${timeSinceLastLogSave} (Expected ~${intervalSecs}s)
+
+Received Queries Breakdown in Payload:
+${receivedQueries.length > 0
+        ? receivedQueries.map(q => `  * ${q}: ${incomingQueryCounts[q]} rows`).join("\n")
+        : "  (None)"}
+
+Completeness Assessment: ${completeness}
+================================================================================
+`);
+
+    if (hostState && !hostState.lastQuerySaveTimes) {
+      hostState.lastQuerySaveTimes = {};
+    }
+
+    // Helper to get capture timestamp of logs in milliseconds
+    const getEntryTimeMs = (entry: OsqueryLogEntry): number => {
+      if (entry.timestamp) {
+        const sec = parseFloat(entry.timestamp);
+        if (!isNaN(sec)) {
+          return sec < 2000000000 ? sec * 1000 : sec;
+        }
+        const parsed = new Date(entry.timestamp);
+        if (!isNaN(parsed.getTime())) {
+          return parsed.getTime();
+        }
+      }
+      return Date.now();
+    };
+
+    // Filter validLogs to only include logs for queries that haven't been saved recently
+    const logsToSave: OsqueryLogEntry[] = [];
+    const queriesToUpdate: string[] = [];
+    let rateLimitedCount = 0;
+    const batchMaxEntryTimes: Record<string, Date> = {};
+
+    for (const entry of validLogs) {
+      const queryName = entry.name;
+      const entryTimeMs = getEntryTimeMs(entry);
+      const lastSaveDate = hostState?.lastQuerySaveTimes?.[queryName];
+      let shouldRateLimitQuery = false;
+
+      if (lastSaveDate) {
+        const lastSaveTimeMs = lastSaveDate.getTime();
+        const elapsed = Math.abs(entryTimeMs - lastSaveTimeMs) / 1000;
+        if (elapsed < intervalSecs - 5) {
+          shouldRateLimitQuery = true;
+        }
+      }
+
+      if (!shouldRateLimitQuery) {
+        logsToSave.push(entry);
+        if (!queriesToUpdate.includes(queryName)) {
+          queriesToUpdate.push(queryName);
+        }
+
+        const entryDate = new Date(entryTimeMs);
+        if (!batchMaxEntryTimes[queryName] || entryTimeMs > batchMaxEntryTimes[queryName].getTime()) {
+          batchMaxEntryTimes[queryName] = entryDate;
+        }
+      } else {
+        rateLimitedCount++;
+      }
+    }
+
+    if (rateLimitedCount > 0) {
+      console.log(`[API - Log] Rate-limiting DB save: dropped ${rateLimitedCount} rows for queries that arrived too early.`);
+    }
+
+    const processedState = ActivityTracker.processLogCheckinWithLogs(nodeKey, logsToSave, hostIdentifier, intervalSecs);
+
+    if (processedState) {
+      processedState.latestCheckinDebug = {
+        selectedFrequencyMinutes: settings.logIntervalMinutes || 10,
+        selectedFrequencySeconds: intervalSecs,
+        timeSinceLastCheckinSeconds: timeSinceLastHeartbeat,
+        timeSinceLastSaveSeconds: timeSinceLastLogSave,
+        receivedQueriesBreakdown: incomingQueryCounts,
+        missingQueries: missingQueries,
+        completeness: completeness,
+        rateLimitedDroppedCount: rateLimitedCount,
+        timestamp: now
+      };
+    }
+
+    if (logsToSave.length > 0) {
+      if (processedState) {
+        if (!processedState.lastQuerySaveTimes) {
+          processedState.lastQuerySaveTimes = {};
+        }
+        for (const queryName of queriesToUpdate) {
+          if (batchMaxEntryTimes[queryName]) {
+            processedState.lastQuerySaveTimes[queryName] = batchMaxEntryTimes[queryName];
+          } else {
+            processedState.lastQuerySaveTimes[queryName] = now;
+          }
+        }
+        processedState.lastLogSaveTime = now;
+      }
+
+      const payload: OsqueryPayload = { node_key: nodeKey, log_type: logType, data: logsToSave };
+      // Non-blocking invocation
+      DatabaseSimulator.persistLogs(payload).catch((err) => {
+        console.error(`[API - Log] Asynchronous db write failure for node ${nodeKey}:`, err);
+      });
+    }
 
     // Return response required by Osquery TLS specification
     return NextResponse.json({

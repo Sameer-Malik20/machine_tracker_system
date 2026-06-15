@@ -11,7 +11,7 @@ export interface PlatformSettings {
 }
 
 export interface Settings {
-  logIntervalMinutes: number; // 1 | 10 | 30 | 60
+  logIntervalMinutes: number; // 1 | 5 | 10 | 30 | 60
   dataRetentionDays: number; // e.g. 30
   retentionAction: "delete" | "archive"; // delete or archive
   windows: PlatformSettings;
@@ -21,7 +21,7 @@ export interface Settings {
 const SETTINGS_FILE = path.join(process.cwd(), "settings.json");
 
 const DEFAULT_SETTINGS: Settings = {
-  logIntervalMinutes: 10,
+  logIntervalMinutes: 30,
   dataRetentionDays: 30,
   retentionAction: "archive",
   windows: {

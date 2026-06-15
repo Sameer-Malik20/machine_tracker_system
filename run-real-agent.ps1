@@ -50,9 +50,7 @@ $ConfContent = @'
     "logger_plugin": "tls",
     "tls_hostname": "SERVER_PLACEHOLDER",
     "config_tls_endpoint": "/api/osquery/config",
-    "config_tls_refresh": 60,
     "logger_tls_endpoint": "/api/osquery/log",
-    "logger_tls_period": 10,
     "enroll_tls_endpoint": "/api/osquery/config",
     "tls_node_api": false,
     "host_identifier": "hostname",
@@ -63,10 +61,29 @@ $ConfContent = @'
 '@.Replace("SERVER_PLACEHOLDER", $ServerAddress)
 [System.IO.File]::WriteAllText("$TargetDir\osquery.conf", $ConfContent)
 
+# Fetch current Logs Arrival Frequency from server
+$IntervalSecs = 600 # Default to 10m
+try {
+    # Force TLS 1.2/1.3 for security
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $apiUrl = "http://$ServerAddress/api/osquery/interval"
+    $res = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 5
+    if ($res -and $res.logIntervalSeconds) {
+        $IntervalSecs = $res.logIntervalSeconds
+        Write-Host "  + Dynamic log interval fetched from server: $($res.logIntervalMinutes)m ($IntervalSecs`s)" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "  [WARNING] Could not fetch log interval from server. Defaulting to 10 minutes (600s)." -ForegroundColor Yellow
+}
+
 $FlagsContent = @"
 # core plugins
 --config_plugin=tls
 --logger_plugin=tls
+
+# Paths
+--database_path=C:\ProgramData\osquery\osquery.db
+--pidfile=C:\ProgramData\osquery\osquery.pid
 
 # Server connection configurations
 --tls_hostname=$ServerAddress
@@ -78,11 +95,9 @@ $FlagsContent = @"
 --host_identifier=hostname
 --tls_node_api=false
 
-# Refresh frequency (configuration pull)
+# Refresh frequencies
 --config_tls_refresh=60
-
-# Logging flush frequency (local log push)
---logger_tls_period=10
+--logger_tls_period=$IntervalSecs
 
 # Disable secure cert check (required for self-signed developer proxy or direct IP connection)
 --tls_allow_unsafe=true

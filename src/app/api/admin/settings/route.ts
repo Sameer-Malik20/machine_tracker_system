@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SettingsManager } from "@/lib/settings";
 import { verifyToken } from "@/lib/auth";
+import { activityRegistry } from "@/lib/activityTracker";
 import MachineLog from "@/lib/models/MachineLog";
 import connectDB from "@/lib/db";
 
@@ -68,6 +69,21 @@ export async function POST(req: NextRequest) {
 
     // Process new settings
     await SettingsManager.saveSettings(body);
+
+    // Reset all per-node rate-limit timestamps so new frequency applies immediately
+    // This ensures that if admin changes from 10m → 1m, logs aren't blocked by old 10m timers
+    const newIntervalMinutes = Number(body.logIntervalMinutes || 10);
+    const newIntervalSecs = newIntervalMinutes * 60;
+    
+    for (const [, hostState] of activityRegistry) {
+      hostState.lastQuerySaveTimes = {};
+      hostState.lastLogSaveTime = undefined;
+      if (hostState.latestCheckinDebug) {
+        hostState.latestCheckinDebug.selectedFrequencyMinutes = newIntervalMinutes;
+        hostState.latestCheckinDebug.selectedFrequencySeconds = newIntervalSecs;
+      }
+    }
+    console.log(`[API - Admin Settings] Frequency changed to ${newIntervalMinutes}m. Rate-limit timers and debug states reset for all ${activityRegistry.size} nodes.`);
 
     // Trigger non-blocking retention cleanup asynchronously
     const dataRetentionDays = Number(body.dataRetentionDays || 30);

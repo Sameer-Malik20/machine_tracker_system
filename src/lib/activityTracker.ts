@@ -27,6 +27,19 @@ export interface HostActivityState {
   }[];
   latestResults?: Record<string, Record<string, string>[]>; // maps queryName to array of result rows
   statusHistory?: StateTransition[];
+  lastLogSaveTime?: Date;
+  lastQuerySaveTimes?: Record<string, Date>;
+  latestCheckinDebug?: {
+    selectedFrequencyMinutes: number;
+    selectedFrequencySeconds: number;
+    timeSinceLastCheckinSeconds: number | string;
+    timeSinceLastSaveSeconds: number | string;
+    receivedQueriesBreakdown: Record<string, number>;
+    missingQueries: string[];
+    completeness: string;
+    rateLimitedDroppedCount: number;
+    timestamp: Date;
+  };
 }
 
 // Global caching pattern for Next.js hot-reloading
@@ -69,9 +82,18 @@ export class ActivityTracker {
         existing.platform = this.parsePlatform(platform);
       }
       existing.lastHeartbeat = now;
-      this.updateStatus(existing, "Active");
       activityRegistry.set(nodeKey, existing);
       return existing;
+    }
+
+    // Clean up any duplicate/stale keys for the same hostname to prevent duplicates on UI
+    if (hostname && hostname !== "unknown_host" && !hostname.startsWith("host_") && hostname !== "") {
+      for (const [key, val] of activityRegistry.entries()) {
+        if (val.hostname && val.hostname.toLowerCase() === hostname.toLowerCase() && key !== nodeKey) {
+          console.log(`[ActivityTracker] Removing duplicate/stale registry entry for ${hostname} (old key: ${key})`);
+          activityRegistry.delete(key);
+        }
+      }
     }
 
     const newState: HostActivityState = {
@@ -97,7 +119,8 @@ export class ActivityTracker {
   static processLogCheckinWithLogs(
     nodeKey: string,
     logs: { name: string; action: string; columns: Record<string, string>; timestamp: string }[],
-    hostIdentifier?: string | null
+    hostIdentifier?: string | null,
+    logIntervalSecs: number = 600
   ): HostActivityState {
     const now = new Date();
     let state = activityRegistry.get(nodeKey);
@@ -122,6 +145,16 @@ export class ActivityTracker {
       // If we already have a state but its hostname is generic and we received a real one, update it
       if (hostIdentifier && hostIdentifier !== "unknown_host" && !hostIdentifier.startsWith("host_")) {
         state.hostname = hostIdentifier;
+      }
+    }
+
+    // Clean up any duplicate/stale keys for the same hostname to prevent duplicates on UI
+    if (state.hostname && state.hostname !== "unknown_host" && !state.hostname.startsWith("host_") && state.hostname !== "") {
+      for (const [key, val] of activityRegistry.entries()) {
+        if (val.hostname && val.hostname.toLowerCase() === state.hostname.toLowerCase() && key !== nodeKey) {
+          console.log(`[ActivityTracker] Removing duplicate/stale registry entry for ${state.hostname} (old key: ${key}) during log check-in`);
+          activityRegistry.delete(key);
+        }
       }
     }
 
@@ -233,13 +266,11 @@ export class ActivityTracker {
       state.recentQueries = state.recentQueries.slice(0, 10);
     }
 
-    // Determine status from both heartbeat delta and actual keyboard/mouse activity logs
+    // Determine status from actual keyboard/mouse activity logs
     const userActivity = state.latestResults?.["user_activity"];
     const activeStatus = userActivity?.find(r => r.name === "ActiveStatus")?.data;
 
-    if (deltaSeconds > this.MAX_EXPECTED_LOG_INTERVAL) {
-      this.updateStatus(state, "Idle");
-    } else if (activeStatus === "Idle") {
+    if (activeStatus === "Idle") {
       this.updateStatus(state, "Idle");
     } else {
       this.updateStatus(state, "Active");
@@ -252,7 +283,7 @@ export class ActivityTracker {
   /**
    * Processes an incoming log payload to calculate the active/idle status (legacy backward compatibility)
    */
-  static processLogCheckin(nodeKey: string, queryName: string, rowCount: number): HostActivityState {
+  static processLogCheckin(nodeKey: string, queryName: string, rowCount: number, logIntervalSecs: number = 600): HostActivityState {
     const now = new Date();
     let state = activityRegistry.get(nodeKey);
 
@@ -274,11 +305,7 @@ export class ActivityTracker {
     state.lastLogIntervalDeltaSeconds = deltaSeconds;
     state.lastHeartbeat = now;
 
-    if (deltaSeconds > this.MAX_EXPECTED_LOG_INTERVAL) {
-      this.updateStatus(state, "Idle");
-    } else {
-      this.updateStatus(state, "Active");
-    }
+    this.updateStatus(state, "Active");
 
     state.recentQueries.unshift({
       queryName,
@@ -296,18 +323,21 @@ export class ActivityTracker {
   /**
    * Evaluates all nodes and applies offline rules for nodes that haven't sent heartbeats.
    */
-  static getActiveRegistry(): HostActivityState[] {
+  static getActiveRegistry(logIntervalSecs: number = 600): HostActivityState[] {
     const now = new Date();
     const list = Array.from(activityRegistry.values());
+
+    const maxExpectedInterval = Math.max(180, logIntervalSecs * 1.0);
+    const offlineThreshold = Math.max(600, logIntervalSecs * 2.0);
 
     for (const node of list) {
       const secondsSinceLastHeartbeat = Math.floor((now.getTime() - node.lastHeartbeat.getTime()) / 1000);
       const userActivity = node.latestResults?.["user_activity"];
       const activeStatus = userActivity?.find(r => r.name === "ActiveStatus")?.data;
 
-      if (secondsSinceLastHeartbeat > this.OFFLINE_THRESHOLD) {
+      if (secondsSinceLastHeartbeat > offlineThreshold) {
         this.updateStatus(node, "Offline");
-      } else if (secondsSinceLastHeartbeat > this.MAX_EXPECTED_LOG_INTERVAL) {
+      } else if (secondsSinceLastHeartbeat > maxExpectedInterval) {
         this.updateStatus(node, "Idle");
       } else if (activeStatus === "Idle") {
         this.updateStatus(node, "Idle");

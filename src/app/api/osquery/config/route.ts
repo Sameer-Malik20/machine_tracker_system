@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { CONFIG } from "@/lib/config";
 import { ActivityTracker, activityRegistry } from "@/lib/activityTracker";
 import { SettingsManager } from "@/lib/settings";
+import { connectDB } from "@/lib/db";
+import EnrolledNode from "@/lib/models/EnrolledNode";
 
 // Set compile configurations
 export const dynamic = "force-dynamic";
@@ -33,6 +35,18 @@ export async function POST(req: NextRequest) {
       // Register the node in the activity tracker
       ActivityTracker.registerNode(nodeKey, hostId, platform);
 
+      // Persist enrollment to MongoDB so it survives server restarts
+      try {
+        await connectDB();
+        await EnrolledNode.findOneAndUpdate(
+          { hostname: hostId },
+          { nodeKey, hostname: hostId, platform, enrolledAt: new Date(), lastSeenAt: new Date() },
+          { upsert: true, new: true }
+        );
+      } catch (dbErr) {
+        console.warn(`[API - Config] Could not persist enrollment to DB:`, dbErr);
+      }
+
       return NextResponse.json({
         node_key: nodeKey,
         node_invalid: false
@@ -47,10 +61,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ node_invalid: true }, { status: 200 });
     }
 
-    // Force re-enrollment if the node key is not recognized in memory (e.g. server restarted)
+    // If not in memory (e.g. server restarted), try to restore from MongoDB before forcing re-enrollment
     if (!ActivityTracker.hasNode(nodeKey)) {
-      console.warn(`[API - Config] Unrecognized node key: ${nodeKey}. Triggering re-enrollment.`);
-      return NextResponse.json({ node_invalid: true }, { status: 200 });
+      let restored = false;
+      try {
+        await connectDB();
+        const persisted = await EnrolledNode.findOne({ nodeKey });
+        if (persisted) {
+          console.log(`[API - Config] Restoring node from DB: ${nodeKey} (${persisted.hostname})`);
+          ActivityTracker.registerNode(nodeKey, persisted.hostname, persisted.platform);
+          restored = true;
+        }
+      } catch (dbErr) {
+        console.warn(`[API - Config] Could not restore node from DB:`, dbErr);
+      }
+      if (!restored) {
+        console.warn(`[API - Config] Unrecognized node key: ${nodeKey}. Triggering re-enrollment.`);
+        return NextResponse.json({ node_invalid: true }, { status: 200 });
+      }
     }
 
     // Retrieve host from registry to check platform
@@ -60,60 +88,68 @@ export async function POST(req: NextRequest) {
     // Update check-in heartbeat for this node key
     ActivityTracker.registerNode(nodeKey, host?.hostname || `host_${nodeKey.substring(14, 20)}`, platform);
 
+    // Update lastSeenAt in MongoDB (non-blocking)
+    connectDB().then(() => EnrolledNode.findOneAndUpdate({ nodeKey }, { lastSeenAt: new Date() })).catch(() => { });
+
     console.log(`[API - Config] Config request received from node key: ${nodeKey} (Platform: ${platform})`);
 
-    // Fetch dynamic admin-configured intervals
-    const intervals = await SettingsManager.getIntervalsForPlatform(platform);
+    // Fetch dynamic admin-configured settings
+    const settings = await SettingsManager.getSettings();
+    const intervalSecs = (settings.logIntervalMinutes || 10) * 60;
 
     // Return the scheduled queries configuration (Osquery packs structure)
     const configResponse = {
+      options: {
+        config_tls_refresh: 60,
+        logger_tls_period: 60,
+      },
       schedule: {
         running_processes: {
           query: "SELECT name, pid, path, resident_size FROM processes;",
-          interval: intervals.processInterval,
+          interval: intervalSecs,
           description: "Tracks active applications and background processes currently running on the endpoint."
         },
         system_performance: {
           query: "SELECT hostname, cpu_brand, physical_memory, (SELECT name FROM os_version) as os_name, (SELECT platform FROM os_version) as os_platform FROM system_info;",
-          interval: intervals.performanceInterval,
+          interval: intervalSecs,
           snapshot: true,
           description: "Collects host hardware architecture and system specifications every 120 seconds."
         },
         active_network_sockets: {
           query: "SELECT pid, local_address, local_port, remote_address, remote_port, state FROM process_open_sockets;",
-          interval: intervals.networkInterval,
+          interval: intervalSecs,
           snapshot: true,
           description: "Collects active network sockets (established and listening ports) on the system."
         },
         user_activity: {
           query: "SELECT name, data FROM registry WHERE path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveStatus' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\IdleSeconds' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\LastInputTime' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeName' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeID' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeEmail' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\Department';",
-          interval: intervals.activityInterval,
+          interval: intervalSecs,
           snapshot: true,
           description: "Tracks active user keyboard and mouse interaction telemetry from the Windows Registry."
         },
         chrome_history: {
           // Uses the ATC virtual table 'chrome_history_atc' defined below
           query: "SELECT url, title, last_visit_time FROM chrome_history_atc ORDER BY last_visit_time DESC LIMIT 20;",
-          interval: 10,
+          interval: intervalSecs,
           snapshot: true,
           description: "Retrieves Chrome browser history from the copied SQLite database via ATC."
         },
         edge_history: {
           // Uses the ATC virtual table 'edge_history_atc' defined below
           query: "SELECT url, title, last_visit_time FROM edge_history_atc ORDER BY last_visit_time DESC LIMIT 20;",
-          interval: 10,
+          interval: intervalSecs,
           snapshot: true,
           description: "Retrieves Edge browser history from the copied SQLite database via ATC."
         },
         window_history: {
           query: "SELECT name as timestamp, data as details FROM registry WHERE key LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\WindowHistory';",
-          interval: 10,
+          interval: intervalSecs,
           snapshot: true,
           description: "Tracks active window foreground changes over time."
         },
         active_window: {
           query: "SELECT name, data FROM registry WHERE path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveStatus' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\IdleSeconds' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\LastInputTime' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveWindowTitle' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveWindowUrl';",
-          interval: 10,
+          interval: intervalSecs,
           snapshot: true,
           description: "High-frequency poll of user active/idle status and current window URL."
         }

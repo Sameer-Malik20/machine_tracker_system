@@ -61,6 +61,39 @@ if (-not $Department)   { $Department   = Read-Host "  Department    (e.g. Engin
 
 Write-Host "  + Employee: $EmployeeName ($EmployeeID) - $Department" -ForegroundColor Green
 
+# --- Pre-Step: Kill ALL existing osqueryd processes (prevent duplicate/lock issues) ---
+Write-Host ""
+Write-Host "  [PRE-STEP] Cleaning up existing osquery processes..." -ForegroundColor Yellow
+
+Stop-Service -Name "osqueryd" -Force -ErrorAction SilentlyContinue
+
+$existing = Get-Process -Name "osqueryd" -ErrorAction SilentlyContinue
+if ($existing) {
+    $existing | ForEach-Object {
+        Write-Host "  + Killing osqueryd PID $($_.Id)..." -ForegroundColor Gray
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 2
+    Write-Host "  + All osqueryd processes terminated" -ForegroundColor Green
+} else {
+    Write-Host "  + No existing osqueryd processes found" -ForegroundColor Gray
+}
+
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' AND CommandLine LIKE '%activity_monitor.ps1%'" | Invoke-CimMethod -MethodName Terminate | Out-Null
+
+$dbFiles = @(
+    "C:\ProgramData\osquery\osquery.db",
+    "C:\ProgramData\osquery\osquery.db-wal",
+    "C:\ProgramData\osquery\osquery.db-shm"
+)
+foreach ($f in $dbFiles) {
+    if (Test-Path $f) {
+        Remove-Item $f -Force -ErrorAction SilentlyContinue
+        Write-Host "  + Removed: $f" -ForegroundColor Gray
+    }
+}
+Write-Host "  + Cleanup complete" -ForegroundColor Green
+
 # --- Step 3: Create Directories & Files ---
 Write-Host ""
 Write-Host "  [STEP 3/5] Creating configuration files..." -ForegroundColor Yellow
@@ -93,17 +126,37 @@ $EmpJson = @"
   "employee_name": "$EmployeeName",
   "employee_id":   "$EmployeeID",
   "email":         "$Email",
-  "department":    "$Department"
+  "department":    "$Department",
+  "server_address": "$ServerAddress"
 }
 "@
 [System.IO.File]::WriteAllText("$TargetDir\employee.json", $EmpJson)
 Write-Host "  + employee.json written -> $TargetDir\employee.json" -ForegroundColor Green
+
+# Fetch current Logs Arrival Frequency from server
+$IntervalSecs = 600 # Default to 10m
+try {
+    # Force TLS 1.2/1.3 for security
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $apiUrl = "http://$ServerAddress/api/osquery/interval"
+    $res = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 5
+    if ($res -and $res.logIntervalSeconds) {
+        $IntervalSecs = $res.logIntervalSeconds
+        Write-Host "  + Dynamic log interval fetched from server: $($res.logIntervalMinutes)m ($IntervalSecs`s)" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "  [WARNING] Could not fetch log interval from server. Defaulting to 10 minutes (600s)." -ForegroundColor Yellow
+}
 
 # Write osquery.flags
 $FlagsContent = @"
 # Core plugins
 --config_plugin=tls
 --logger_plugin=tls
+
+# Paths
+--database_path=C:\ProgramData\osquery\osquery.db
+--pidfile=C:\ProgramData\osquery\osquery.pid
 
 # Server connection
 --tls_hostname=$ServerAddress
@@ -117,7 +170,7 @@ $FlagsContent = @"
 
 # Refresh frequencies
 --config_tls_refresh=60
---logger_tls_period=10
+--logger_tls_period=60
 
 # Allow self-signed certs (for internal network)
 --tls_allow_unsafe=true
@@ -304,62 +357,71 @@ while ($true) {
             $userName = [System.Environment]::UserName
             $destDir  = "C:\ProgramData\osquery"
 
-            $browsers = @(
-                @{ Dir = "C:\Users\$userName\AppData\Local\Google\Chrome\User Data\Default"; Prefix = "chrome_history" },
-                @{ Dir = "C:\Users\$userName\AppData\Local\Microsoft\Edge\User Data\Default";  Prefix = "edge_history" }
+            $browserRoots = @(
+                @{ Root = "C:\Users\$userName\AppData\Local\Google\Chrome\User Data"; Prefix = "chrome_history" },
+                @{ Root = "C:\Users\$userName\AppData\Local\Microsoft\Edge\User Data";  Prefix = "edge_history" }
             )
 
-            foreach ($br in $browsers) {
-                $mainSrc = "$($br.Dir)\History"
-                if (-not (Test-Path $mainSrc)) { continue }
+            foreach ($br in $browserRoots) {
+                if (-not (Test-Path $br.Root)) { continue }
+                
+                # Find all subdirectories that contain a 'History' file
+                $historyFiles = Get-ChildItem -Path $br.Root -Depth 2 -Filter "History" -File -ErrorAction SilentlyContinue
+                
+                # Copy the one with the newest LastWriteTime (active profile session)
+                if ($historyFiles) {
+                    $activeHistory = $historyFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                    $profileDir = $activeHistory.DirectoryName
+                    
+                    $filePairs = @(
+                        @{ Src = "$profileDir\History";     Dest = "$destDir\$($br.Prefix).db" },
+                        @{ Src = "$profileDir\History-wal"; Dest = "$destDir\$($br.Prefix).db-wal" },
+                        @{ Src = "$profileDir\History-shm"; Dest = "$destDir\$($br.Prefix).db-shm" }
+                    )
 
-                # Copy each SQLite file: main db + WAL + SHM
-                $filePairs = @(
-                    @{ Src = "$($br.Dir)\History";     Dest = "$destDir\$($br.Prefix).db" },
-                    @{ Src = "$($br.Dir)\History-wal"; Dest = "$destDir\$($br.Prefix).db-wal" },
-                    @{ Src = "$($br.Dir)\History-shm"; Dest = "$destDir\$($br.Prefix).db-shm" }
-                )
+                    foreach ($fp in $filePairs) {
+                        if (-not (Test-Path $fp.Src)) { continue }
+                        $copied = $false
 
-                foreach ($fp in $filePairs) {
-                    if (-not (Test-Path $fp.Src)) { continue }
-                    $copied = $false
-
-                    # Method 1: Direct copy (works when browser is closed)
-                    try {
-                        [System.IO.File]::Copy($fp.Src, $fp.Dest, $true)
-                        $copied = $true
-                    } catch {}
-
-                    # Method 2: FileStream with ReadWrite share (works while Chrome is open)
-                    # Chrome uses SQLite byte-range locks, not exclusive file locks
-                    if (-not $copied) {
+                        # Method 1: Direct copy (works when browser is closed)
                         try {
-                            $fs    = [System.IO.File]::Open($fp.Src, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                            $outFs = [System.IO.File]::Open($fp.Dest, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-                            $fs.CopyTo($outFs)
-                            $outFs.Flush(); $outFs.Close(); $fs.Close()
+                            [System.IO.File]::Copy($fp.Src, $fp.Dest, $true)
                             $copied = $true
                         } catch {}
-                    }
 
-                    # Method 3: robocopy /B (backup mode, needs admin)
-                    if (-not $copied) {
-                        try {
-                            $srcDir  = [System.IO.Path]::GetDirectoryName($fp.Src)
-                            $srcFile = [System.IO.Path]::GetFileName($fp.Src)
-                            $tmpDir  = "$destDir\tmp_br"
-                            New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
-                            robocopy $srcDir $tmpDir $srcFile /B /NFL /NDL /NJH /NJS /NC /NS /NP 2>$null | Out-Null
-                            $tmpFile = "$tmpDir\$srcFile"
-                            if (Test-Path $tmpFile) {
-                                [System.IO.File]::Copy($tmpFile, $fp.Dest, $true)
-                                Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
-                            }
-                        } catch {}
+                        # Method 2: FileStream with ReadWrite share (works while Chrome is open)
+                        if (-not $copied) {
+                            try {
+                                $fs    = [System.IO.File]::Open($fp.Src, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                                $outFs = [System.IO.File]::Open($fp.Dest, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                                $fs.CopyTo($outFs)
+                                $outFs.Flush(); $outFs.Close(); $fs.Close()
+                                $copied = $true
+                            } catch {}
+                        }
+
+                        # Method 3: robocopy /B (backup mode, needs admin)
+                        if (-not $copied) {
+                            try {
+                                $srcDir  = [System.IO.Path]::GetDirectoryName($fp.Src)
+                                $srcFile = [System.IO.Path]::GetFileName($fp.Src)
+                                $tmpDir  = "$destDir\tmp_br"
+                                New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+                                robocopy $srcDir $tmpDir $srcFile /B /NFL /NDL /NJH /NJS /NC /NS /NP 2>$null | Out-Null
+                                $tmpFile = "$tmpDir\$srcFile"
+                                if (Test-Path $tmpFile) {
+                                    [System.IO.File]::Copy($tmpFile, $fp.Dest, $true)
+                                    Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+                                }
+                            } catch {}
+                        }
                     }
                 }
             }
         }
+
+        # Config sync block removed - logger_tls_period is permanently set to 60s for instant uploads.
+
         $loopCount++
     } catch {}
     Start-Sleep -Seconds 2
