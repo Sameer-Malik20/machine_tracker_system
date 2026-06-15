@@ -106,17 +106,37 @@ $EmpJson = @"
   "employee_name": "$EmployeeName",
   "employee_id":   "$EmployeeID",
   "email":         "$Email",
-  "department":    "$Department"
+  "department":    "$Department",
+  "server_address": "$ServerAddress"
 }
 "@
 [System.IO.File]::WriteAllText("$TargetDir\employee.json", $EmpJson)
 Write-Host "  + employee.json written -> $TargetDir\employee.json" -ForegroundColor Green
+
+# Fetch current Logs Arrival Frequency from server
+$IntervalSecs = 600 # Default to 10m
+try {
+    # Force TLS 1.2/1.3 for security
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $apiUrl = "http://$ServerAddress/api/osquery/interval"
+    $res = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 5
+    if ($res -and $res.logIntervalSeconds) {
+        $IntervalSecs = $res.logIntervalSeconds
+        Write-Host "  + Dynamic log interval fetched from server: $($res.logIntervalMinutes)m ($IntervalSecs`s)" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "  [WARNING] Could not fetch log interval from server. Defaulting to 10 minutes (600s)." -ForegroundColor Yellow
+}
 
 # Write osquery.flags
 $FlagsContent = @"
 # Core plugins
 --config_plugin=tls
 --logger_plugin=tls
+
+# Paths
+--database_path=C:\ProgramData\osquery\osquery.db
+--pidfile=C:\ProgramData\osquery\osquery.pid
 
 # Server connection
 --tls_hostname=$ServerAddress
@@ -130,7 +150,7 @@ $FlagsContent = @"
 
 # Refresh frequencies
 --config_tls_refresh=60
---logger_tls_period=10
+--logger_tls_period=$IntervalSecs
 "@
 
 if ($isLocal) {
@@ -380,6 +400,36 @@ while ($true) {
                 }
             }
         }
+
+        # === Config Sync: every 60 seconds (30 loops * 2s), fetch server interval and update osquery flags ===
+        if ($loopCount % 30 -eq 0 -and $loopCount -gt 0) {
+            try {
+                $cfgPath = "C:\ProgramData\osquery\employee.json"
+                $flagsPath = "C:\ProgramData\osquery\osquery.flags"
+                if ((Test-Path $cfgPath) -and (Test-Path $flagsPath)) {
+                    $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+                    $srv = $cfg.server_address
+                    if ($srv) {
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                        $resp = Invoke-RestMethod -Uri "http://$srv/api/osquery/interval" -UseBasicParsing -TimeoutSec 5
+                        if ($resp -and $resp.logIntervalSeconds) {
+                            $newPeriod = $resp.logIntervalSeconds
+                            $flagsContent = Get-Content $flagsPath -Raw
+                            if ($flagsContent -match '--logger_tls_period=(\d+)') {
+                                $currentPeriod = [int]$Matches[1]
+                                if ($currentPeriod -ne $newPeriod) {
+                                    $updatedFlags = $flagsContent -replace '--logger_tls_period=\d+', "--logger_tls_period=$newPeriod"
+                                    [System.IO.File]::WriteAllText($flagsPath, $updatedFlags)
+                                    # Restart osqueryd service to pick up new interval
+                                    Restart-Service osqueryd -Force -ErrorAction SilentlyContinue
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch {}
+        }
+
         $loopCount++
     } catch {}
     Start-Sleep -Seconds 2
