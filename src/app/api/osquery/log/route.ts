@@ -205,16 +205,37 @@ Completeness Assessment: ${completeness}
     let rateLimitedCount = 0;
     const batchMaxEntryTimes: Record<string, Date> = {};
 
+    const platformSettings = platform === "darwin" ? settings.mac : settings.windows;
+
     for (const entry of validLogs) {
       const queryName = entry.name;
       const entryTimeMs = getEntryTimeMs(entry);
+
+      let queryInterval = (settings.logIntervalMinutes || 10) * 60; // fallback
+      if (queryName === "running_processes") {
+        queryInterval = platformSettings.processInterval || 60;
+      } else if (queryName === "system_performance") {
+        queryInterval = platformSettings.performanceInterval || 60;
+      } else if (queryName === "active_network_sockets") {
+        queryInterval = platformSettings.networkInterval || 60;
+      } else if (
+        queryName === "user_activity" ||
+        queryName === "active_window" ||
+        queryName === "window_history" ||
+        queryName === "chrome_history" ||
+        queryName === "edge_history"
+      ) {
+        queryInterval = platformSettings.activityInterval || 60;
+      }
+
       const lastSaveDate = hostState?.lastQuerySaveTimes?.[queryName];
       let shouldRateLimitQuery = false;
 
       if (lastSaveDate) {
         const lastSaveTimeMs = lastSaveDate.getTime();
         const elapsed = Math.abs(entryTimeMs - lastSaveTimeMs) / 1000;
-        if (elapsed < intervalSecs - 5) {
+        const gracePeriod = Math.min(10, queryInterval * 0.1);
+        if (elapsed < queryInterval - gracePeriod) {
           shouldRateLimitQuery = true;
         }
       }

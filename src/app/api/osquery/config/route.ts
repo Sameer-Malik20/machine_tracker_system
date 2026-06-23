@@ -95,7 +95,12 @@ export async function POST(req: NextRequest) {
 
     // Fetch dynamic admin-configured settings
     const settings = await SettingsManager.getSettings();
-    const intervalSecs = (settings.logIntervalMinutes || 10) * 60;
+    const platformSettings = platform === "darwin" ? settings.mac : settings.windows;
+
+    const processInterval = platformSettings.processInterval || 60;
+    const performanceInterval = platformSettings.performanceInterval || 60;
+    const networkInterval = platformSettings.networkInterval || 60;
+    const activityInterval = platformSettings.activityInterval || 60;
 
     // Return the scheduled queries configuration (Osquery packs structure)
     const configResponse = {
@@ -106,50 +111,50 @@ export async function POST(req: NextRequest) {
       schedule: {
         running_processes: {
           query: "SELECT name, pid, path, resident_size FROM processes;",
-          interval: intervalSecs,
+          interval: processInterval,
           description: "Tracks active applications and background processes currently running on the endpoint."
         },
         system_performance: {
           query: "SELECT hostname, cpu_brand, physical_memory, (SELECT name FROM os_version) as os_name, (SELECT platform FROM os_version) as os_platform FROM system_info;",
-          interval: intervalSecs,
+          interval: performanceInterval,
           snapshot: true,
           description: "Collects host hardware architecture and system specifications every 120 seconds."
         },
         active_network_sockets: {
           query: "SELECT pid, local_address, local_port, remote_address, remote_port, state FROM process_open_sockets;",
-          interval: intervalSecs,
+          interval: networkInterval,
           snapshot: true,
           description: "Collects active network sockets (established and listening ports) on the system."
         },
         user_activity: {
           query: "SELECT name, data FROM registry WHERE path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveStatus' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\IdleSeconds' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\LastInputTime' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeName' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeID' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeEmail' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\Department';",
-          interval: intervalSecs,
+          interval: activityInterval,
           snapshot: true,
           description: "Tracks active user keyboard and mouse interaction telemetry from the Windows Registry."
         },
         chrome_history: {
           // Uses the ATC virtual table 'chrome_history_atc' defined below
           query: "SELECT url, title, last_visit_time FROM chrome_history_atc ORDER BY last_visit_time DESC LIMIT 20;",
-          interval: intervalSecs,
+          interval: activityInterval,
           snapshot: true,
           description: "Retrieves Chrome browser history from the copied SQLite database via ATC."
         },
         edge_history: {
           // Uses the ATC virtual table 'edge_history_atc' defined below
           query: "SELECT url, title, last_visit_time FROM edge_history_atc ORDER BY last_visit_time DESC LIMIT 20;",
-          interval: intervalSecs,
+          interval: activityInterval,
           snapshot: true,
           description: "Retrieves Edge browser history from the copied SQLite database via ATC."
         },
         window_history: {
           query: "SELECT name as timestamp, data as details FROM registry WHERE key LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\WindowHistory';",
-          interval: intervalSecs,
+          interval: activityInterval,
           snapshot: true,
           description: "Tracks active window foreground changes over time."
         },
         active_window: {
           query: "SELECT name, data FROM registry WHERE path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveStatus' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\IdleSeconds' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\LastInputTime' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveWindowTitle' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveWindowUrl';",
-          interval: intervalSecs,
+          interval: activityInterval,
           snapshot: true,
           description: "High-frequency poll of user active/idle status and current window URL."
         }

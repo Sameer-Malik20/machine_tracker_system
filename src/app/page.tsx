@@ -130,9 +130,116 @@ export default function DashboardPage() {
   // Notification panel state
   const [notifOpen, setNotifOpen] = useState(false);
 
+  const todayStr = (() => {
+    if (typeof window === "undefined") return "";
+    const now = new Date();
+    const offset = now.getTimezoneOffset();
+    const localNow = new Date(now.getTime() - offset * 60 * 1000);
+    return localNow.toISOString().split("T")[0];
+  })();
+
+  const [selectedDate, setSelectedDate] = useState<string>("");
+  const [historyData, setHistoryData] = useState<any | null>(null);
+  const [historyLoading, setHistoryLoading] = useState<boolean>(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  // Initialize selectedDate when component mounts or a host is inspected
+  useEffect(() => {
+    if (inspectingNodeKey) {
+      const now = new Date();
+      const offset = now.getTimezoneOffset();
+      const localNow = new Date(now.getTime() - offset * 60 * 1000);
+      setSelectedDate(localNow.toISOString().split("T")[0]);
+      setHistoryData(null);
+      setHistoryError(null);
+    }
+  }, [inspectingNodeKey]);
+
+  // Fetch history when selectedDate or inspectingNodeKey changes
+  useEffect(() => {
+    if (!inspectingNodeKey) {
+      setHistoryData(null);
+      return;
+    }
+
+    const currentTodayStr = (() => {
+      const now = new Date();
+      const offset = now.getTimezoneOffset();
+      const localNow = new Date(now.getTime() - offset * 60 * 1000);
+      return localNow.toISOString().split("T")[0];
+    })();
+
+    if (selectedDate === currentTodayStr) {
+      setHistoryData(null);
+      setHistoryError(null);
+      return;
+    }
+
+    if (!selectedDate) return;
+
+    let isCurrent = true;
+    const fetchHistory = async () => {
+      setHistoryLoading(true);
+      setHistoryError(null);
+      try {
+        const tzOffset = new Date().getTimezoneOffset();
+        const res = await fetch(`/api/osquery/history?nodeKey=${inspectingNodeKey}&date=${selectedDate}&tzOffset=${tzOffset}`);
+        if (!res.ok) {
+          throw new Error("Failed to fetch historical telemetry.");
+        }
+        const data = await res.json();
+        if (isCurrent) {
+          setHistoryData(data);
+        }
+      } catch (err: any) {
+        if (isCurrent) {
+          setHistoryError(err.message || "An error occurred fetching history.");
+        }
+      } finally {
+        if (isCurrent) {
+          setHistoryLoading(false);
+        }
+      }
+    };
+
+    fetchHistory();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [selectedDate, inspectingNodeKey]);
+
   const inspectingHost = inspectingNodeKey
     ? hosts.find((h) => h.nodeKey === inspectingNodeKey) || null
     : null;
+
+  const displayHost: Host | null = historyData
+    ? {
+      nodeKey: historyData.nodeKey,
+      hostname: historyData.hostname,
+      platform: historyData.platform as "windows" | "darwin" | "unknown",
+      lastHeartbeat: historyData.lastHeartbeat,
+      lastLogIntervalDeltaSeconds: 0,
+      status: (historyData.statusHistory?.[0]?.status || "Offline") as "Active" | "Idle" | "Offline",
+      recentQueries: (historyData.recentQueries || []).map((q: any) => ({
+        queryName: q.queryName,
+        timestamp: q.timestamp,
+        rowCount: q.rowCount
+      })),
+      latestResults: historyData.latestResults || {},
+      statusHistory: (historyData.statusHistory || []).map((s: any) => ({
+        status: s.status as "Active" | "Idle" | "Offline",
+        startTime: s.startTime,
+        endTime: s.endTime,
+        durationSeconds: s.durationSeconds
+      })),
+      employeeName: inspectingHost?.employeeName,
+      employeeId: inspectingHost?.employeeId,
+      email: inspectingHost?.email,
+      department: inspectingHost?.department,
+      latestCheckinDebug: historyData.latestCheckinDebug
+    }
+    : inspectingHost;
 
   // Sync theme with document element attribute
   useEffect(() => {
@@ -2142,7 +2249,7 @@ export default function DashboardPage() {
       {/* OVERLAY MODAL: Host Telemetry Inspector */}
       {/* ──────────────────────────────────────────────────────── */}
       <AnimatePresence>
-        {inspectingHost && (
+        {inspectingHost && displayHost && (
           <div className="modal-overlay" onClick={() => setInspectingNodeKey(null)}>
             <motion.div
               className="modal-card"
@@ -2155,55 +2262,55 @@ export default function DashboardPage() {
               <div className="modal-header">
                 <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                   <span className="platform-icon" style={{ fontSize: "1.2rem", width: "40px", height: "40px" }}>
-                    {getPlatformIcon(inspectingHost.platform)}
+                    {getPlatformIcon(displayHost.platform)}
                   </span>
                   <div>
                     <h2 style={{ fontSize: "1.15rem", fontWeight: 700, margin: 0, display: "flex", alignItems: "center", gap: "10px" }}>
-                      {inspectingHost.employeeName || inspectingHost.hostname}
-                      <span className={`status-badge ${inspectingHost.status === "Active"
+                      {displayHost.employeeName || displayHost.hostname}
+                      <span className={`status-badge ${displayHost.status === "Active"
                         ? "status-active"
-                        : inspectingHost.status === "Idle"
+                        : displayHost.status === "Idle"
                           ? "status-idle"
                           : "status-offline"
                         }`} style={{ fontSize: "0.64rem", padding: "2px 8px" }}>
-                        {inspectingHost.status}
+                        {displayHost.status}
                       </span>
                     </h2>
                     <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-                      Node Key: {inspectingHost.nodeKey}
+                      Node Key: {displayHost.nodeKey}
                     </span>
                     {/* Employee detail pills */}
-                    {(inspectingHost.employeeId || inspectingHost.email || inspectingHost.department) && (
+                    {(displayHost.employeeId || displayHost.email || displayHost.department) && (
                       <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "6px" }}>
-                        {inspectingHost.employeeId && (
+                        {displayHost.employeeId && (
                           <span style={{
                             fontSize: "0.7rem", fontWeight: 600, padding: "2px 10px",
                             background: "var(--bg-input)", border: "1px solid var(--border-medium)",
                             borderRadius: "var(--radius-full)", color: "var(--accent-text)",
                             fontFamily: "var(--font-mono)"
-                          }}>🪪 {inspectingHost.employeeId}</span>
+                          }}>🪪 {displayHost.employeeId}</span>
                         )}
-                        {inspectingHost.department && (
+                        {displayHost.department && (
                           <span style={{
                             fontSize: "0.7rem", fontWeight: 600, padding: "2px 10px",
                             background: "var(--bg-input)", border: "1px solid var(--border-medium)",
                             borderRadius: "var(--radius-full)", color: "var(--text-primary)"
-                          }}>🏢 {inspectingHost.department}</span>
+                          }}>🏢 {displayHost.department}</span>
                         )}
-                        {inspectingHost.email && (
+                        {displayHost.email && (
                           <span style={{
                             fontSize: "0.7rem", fontWeight: 600, padding: "2px 10px",
                             background: "var(--bg-input)", border: "1px solid var(--border-medium)",
                             borderRadius: "var(--radius-full)", color: "var(--text-secondary)"
-                          }}>📧 {inspectingHost.email}</span>
+                          }}>📧 {displayHost.email}</span>
                         )}
-                        {inspectingHost.hostname && inspectingHost.employeeName && (
+                        {displayHost.hostname && displayHost.employeeName && (
                           <span style={{
                             fontSize: "0.7rem", fontWeight: 600, padding: "2px 10px",
                             background: "var(--bg-input)", border: "1px solid var(--border-medium)",
                             borderRadius: "var(--radius-full)", color: "var(--text-muted)",
                             fontFamily: "var(--font-mono)"
-                          }}>💻 {inspectingHost.hostname}</span>
+                          }}>💻 {displayHost.hostname}</span>
                         )}
                       </div>
                     )}
@@ -2220,15 +2327,15 @@ export default function DashboardPage() {
                   <div className="detail-panel">
                     <span className="sidebar-label" style={{ fontSize: "0.68rem" }}>Operating System</span>
                     <div className="sidebar-value" style={{ fontSize: "0.92rem", marginTop: "2px" }}>
-                      {inspectingHost.latestResults?.["system_performance"]?.[0]?.os_name ||
-                        (inspectingHost.platform === "unknown" ? "Unknown" : inspectingHost.platform === "darwin" ? "macOS" : "Windows")}
+                      {displayHost.latestResults?.["system_performance"]?.[0]?.os_name ||
+                        (displayHost.platform === "unknown" ? "Unknown" : displayHost.platform === "darwin" ? "macOS" : "Windows")}
                     </div>
                   </div>
                   <div className="detail-panel">
                     <span className="sidebar-label" style={{ fontSize: "0.68rem" }}>Input Activity (KB/Mouse)</span>
                     <div className="sidebar-value" style={{ fontSize: "0.92rem", marginTop: "2px" }}>
                       {(() => {
-                        const activity = inspectingHost.latestResults?.["user_activity"];
+                        const activity = displayHost.latestResults?.["user_activity"];
                         if (!activity) return <span style={{ color: "var(--text-muted)", fontWeight: 500 }}>No telemetry</span>;
                         const status = activity.find(r => r.name === "ActiveStatus")?.data || "Active";
                         const idleSecs = activity.find(r => r.name === "IdleSeconds")?.data;
@@ -2243,14 +2350,63 @@ export default function DashboardPage() {
                   <div className="detail-panel">
                     <span className="sidebar-label" style={{ fontSize: "0.68rem" }}>Last Transmission</span>
                     <div className="sidebar-value" style={{ fontSize: "0.92rem", marginTop: "2px" }}>
-                      {formatTime(inspectingHost.lastHeartbeat)}
+                      {formatTime(displayHost.lastHeartbeat)}
                     </div>
                   </div>
                   <div className="detail-panel">
                     <span className="sidebar-label" style={{ fontSize: "0.68rem" }}>Delta check-in</span>
                     <div className="sidebar-value" style={{ fontSize: "0.92rem", marginTop: "2px" }}>
-                      {inspectingHost.lastLogIntervalDeltaSeconds}s ago
+                      {selectedDate === todayStr ? `${displayHost.lastLogIntervalDeltaSeconds}s ago` : "N/A (Historical)"}
                     </div>
+                  </div>
+                </div>
+
+                {/* Date Selector for Historical Telemetry */}
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "12px 16px",
+                  background: "var(--bg-input)",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-medium)",
+                  marginTop: "4px"
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                    <span style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text-secondary)" }}>📅 Telemetry Date:</span>
+                    <input
+                      type="date"
+                      value={selectedDate}
+                      max={todayStr}
+                      onChange={(e) => setSelectedDate(e.target.value)}
+                      style={{
+                        background: "var(--bg-card)",
+                        border: "1px solid var(--border-light)",
+                        color: "var(--text-primary)",
+                        padding: "6px 12px",
+                        borderRadius: "var(--radius-sm)",
+                        fontFamily: "var(--font-sans)",
+                        fontSize: "0.85rem",
+                        outline: "none"
+                      }}
+                    />
+                    {selectedDate !== todayStr && (
+                      <span className="status-badge status-idle" style={{ fontSize: "0.68rem", padding: "2px 8px", background: "rgba(255, 179, 64, 0.15)", color: "var(--status-idle)" }}>
+                        📜 Historical View
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    {historyLoading && (
+                      <span style={{ fontSize: "0.8rem", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "6px" }}>
+                        <span className="live-dot" style={{ background: "var(--status-idle)", width: "8px", height: "8px" }} /> Loading history...
+                      </span>
+                    )}
+                    {historyError && (
+                      <span style={{ fontSize: "0.8rem", color: "var(--status-offline)" }}>
+                        ⚠️ {historyError}
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -2301,7 +2457,7 @@ export default function DashboardPage() {
                   {activeTab === "processes" && (
                     <div>
                       <div className="detail-section-label">Real Active Applications & Background Processes</div>
-                      {inspectingHost.latestResults?.["running_processes"] ? (
+                      {displayHost.latestResults?.["running_processes"] ? (
                         <div className="table-wrapper" style={{ maxHeight: "300px", overflowY: "auto" }}>
                           <table className="hosts-table" style={{ fontSize: "0.78rem" }}>
                             <thead style={{ position: "sticky", top: 0, zIndex: 10 }}>
@@ -2313,7 +2469,7 @@ export default function DashboardPage() {
                               </tr>
                             </thead>
                             <tbody>
-                              {inspectingHost.latestResults["running_processes"].map((proc, idx) => (
+                              {displayHost.latestResults["running_processes"].map((proc, idx) => (
                                 <tr key={idx}>
                                   <td style={{ fontWeight: 600, color: "var(--accent-text)" }}>{proc.name || "N/A"}</td>
                                   <td style={{ fontFamily: "var(--font-mono)" }}>{proc.pid || "N/A"}</td>
@@ -2358,7 +2514,7 @@ export default function DashboardPage() {
                         <div>
                           <div className="detail-section-label">Active App Window Logs (Incognito & Normal Mode Tracker)</div>
                           {(() => {
-                            const rawEvents = inspectingHost.latestResults?.["window_history"] || [];
+                            const rawEvents = displayHost.latestResults?.["window_history"] || [];
 
                             if (rawEvents.length === 0) {
                               return (
@@ -2405,7 +2561,7 @@ export default function DashboardPage() {
                                 durationSec = Math.max(0, Math.round((nextMs - currentMs) / 1000));
                               } else {
                                 const currentMs = new Date(event.timestamp).getTime();
-                                const referenceMs = new Date(inspectingHost.lastHeartbeat).getTime();
+                                const referenceMs = new Date(displayHost.lastHeartbeat).getTime();
                                 durationSec = Math.max(0, Math.round((referenceMs - currentMs) / 1000));
                               }
                               return { ...event, durationSec };
@@ -2492,8 +2648,8 @@ export default function DashboardPage() {
                         <div>
                           <div className="detail-section-label">Recent Browser History (Chrome & Edge Copies)</div>
                           {(() => {
-                            const chromeHist = inspectingHost.latestResults?.["chrome_history"] || [];
-                            const edgeHist = inspectingHost.latestResults?.["edge_history"] || [];
+                            const chromeHist = displayHost.latestResults?.["chrome_history"] || [];
+                            const edgeHist = displayHost.latestResults?.["edge_history"] || [];
 
                             // Combine history and sort by last_visit_time descending
                             const combinedHist = ([
@@ -2578,7 +2734,7 @@ export default function DashboardPage() {
                       <div className="detail-section-label">Real Listening Network Socket connections</div>
 
                       {/* Hardware Specs Row */}
-                      {inspectingHost.latestResults?.["system_performance"] && (
+                      {displayHost.latestResults?.["system_performance"] && (
                         <div style={{
                           display: "flex",
                           gap: "16px",
@@ -2589,7 +2745,7 @@ export default function DashboardPage() {
                           border: "1px solid var(--border-light)",
                           fontSize: "0.82rem"
                         }}>
-                          {inspectingHost.latestResults["system_performance"].map((spec, idx) => (
+                          {displayHost.latestResults["system_performance"].map((spec, idx) => (
                             <div key={idx} style={{ display: "flex", gap: "16px", alignItems: "center", width: "100%" }}>
                               <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                                 <span style={{ color: "var(--text-secondary)", fontWeight: 500 }}>💻 CPU:</span>
@@ -2607,7 +2763,7 @@ export default function DashboardPage() {
                         </div>
                       )}
 
-                      {inspectingHost.latestResults?.["active_network_sockets"] ? (
+                      {displayHost.latestResults?.["active_network_sockets"] ? (
                         <div className="table-wrapper" style={{ maxHeight: "300px", overflowY: "auto" }}>
                           <table className="hosts-table" style={{ fontSize: "0.78rem" }}>
                             <thead>
@@ -2621,7 +2777,7 @@ export default function DashboardPage() {
                               </tr>
                             </thead>
                             <tbody>
-                              {inspectingHost.latestResults["active_network_sockets"].map((sock, idx) => (
+                              {displayHost.latestResults["active_network_sockets"].map((sock, idx) => (
                                 <tr key={idx}>
                                   <td style={{ fontFamily: "var(--font-mono)" }}>{sock.pid || "N/A"}</td>
                                   <td>{sock.local_address || "0.0.0.0"}</td>
@@ -2652,7 +2808,7 @@ export default function DashboardPage() {
                     <div>
                       <div className="detail-section-label">Log Check-in History Stream (Real) - Data arrives every {settings.logIntervalMinutes} minutes</div>
 
-                      {inspectingHost.latestCheckinDebug && (
+                      {displayHost.latestCheckinDebug && (
                         <div className="detail-panel" style={{
                           marginBottom: "16px",
                           border: "1px dashed var(--border-medium)",
@@ -2663,51 +2819,23 @@ export default function DashboardPage() {
                           fontSize: "0.85rem",
                           lineHeight: "1.5"
                         }}>
-                          {/* <div style={{ fontWeight: 700, color: "var(--accent-cyan)", marginBottom: "8px", borderBottom: "1px solid var(--border-medium)", paddingBottom: "4px" }}>
-                            🔍 REAL-TIME ARRIVAL DEBUG INFO
-                          </div>
-                          <div><strong>Selected Log Interval:</strong> {inspectingHost.latestCheckinDebug.selectedFrequencyMinutes}m ({inspectingHost.latestCheckinDebug.selectedFrequencySeconds}s)</div>
-                          <div><strong>Time Since Last Check-in:</strong> {inspectingHost.latestCheckinDebug.timeSinceLastCheckinSeconds}</div>
-                          <div><strong>Time Since Last DB Log Save:</strong> {inspectingHost.latestCheckinDebug.timeSinceLastSaveSeconds}</div>
-                          <div style={{ marginTop: "6px" }}>
-                            <strong>Received Queries Breakdown:</strong>
-                            <div style={{ paddingLeft: "12px", color: "var(--text-secondary)" }}>
-                              {Object.entries(inspectingHost.latestCheckinDebug.receivedQueriesBreakdown).length > 0 ? (
-                                Object.entries(inspectingHost.latestCheckinDebug.receivedQueriesBreakdown).map(([q, count]) => (
-                                  <div key={q}>• {q}: {count} rows</div>
-                                ))
-                              ) : (
-                                <div>(None)</div>
-                              )}
-                            </div>
-                          </div> */}
-                          {/* <div style={{ marginTop: "6px" }}>
-                            <strong>Missing Expected Queries:</strong>
-                            <div style={{ paddingLeft: "12px", color: "var(--text-secondary)" }}>
-                              {inspectingHost.latestCheckinDebug.missingQueries.length > 0 ? (
-                                <span style={{ color: "var(--accent-orange)" }}>{inspectingHost.latestCheckinDebug.missingQueries.join(", ")}</span>
-                              ) : (
-                                <span style={{ color: "var(--accent-green)" }}>None (All expected queries received)</span>
-                              )}
-                            </div>
-                          </div> */}
-                          <div style={{ marginTop: "8px", paddingTop: "8px", borderTop: "1px solid var(--border-medium)" }}>
+                          <div style={{ marginTop: "8px", paddingTop: "8px" }}>
                             <strong>Completeness Status:</strong> <span style={{
                               fontWeight: 700,
-                              color: inspectingHost.latestCheckinDebug.completeness.includes("PROPER") ? "var(--accent-green)" : "var(--accent-orange)"
-                            }}>{inspectingHost.latestCheckinDebug.completeness}</span>
+                              color: displayHost.latestCheckinDebug.completeness.includes("PROPER") ? "var(--accent-green)" : "var(--accent-orange)"
+                            }}>{displayHost.latestCheckinDebug.completeness}</span>
                           </div>
-                          {inspectingHost.latestCheckinDebug.rateLimitedDroppedCount > 0 && (
+                          {displayHost.latestCheckinDebug.rateLimitedDroppedCount > 0 && (
                             <div style={{ color: "var(--accent-orange)", marginTop: "4px" }}>
-                              ⚠️ <strong>Rate Limiter:</strong> Dropped {inspectingHost.latestCheckinDebug.rateLimitedDroppedCount} rows that arrived too early.
+                              ⚠️ <strong>Rate Limiter:</strong> Dropped {displayHost.latestCheckinDebug.rateLimitedDroppedCount} rows that arrived too early.
                             </div>
                           )}
                         </div>
                       )}
 
-                      {inspectingHost.recentQueries?.length > 0 ? (
+                      {displayHost.recentQueries?.length > 0 ? (
                         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                          {inspectingHost.recentQueries.map((query, idx) => (
+                          {displayHost.recentQueries.map((query, idx) => (
                             <div key={idx} className="query-log-item">
                               <div>
                                 <div className="query-log-name">{query.queryName}</div>
@@ -2716,8 +2844,8 @@ export default function DashboardPage() {
                                 </div>
                                 {query.queryName === "user_activity" && (
                                   <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginTop: "4px" }}>
-                                    Input Status: {inspectingHost.latestResults?.["user_activity"]?.find(r => r.name === "ActiveStatus")?.data || "Active"}
-                                    {inspectingHost.latestResults?.["user_activity"]?.find(r => r.name === "IdleSeconds")?.data ? ` | Idle Time: ${inspectingHost.latestResults?.["user_activity"]?.find(r => r.name === "IdleSeconds")?.data}s` : ""}
+                                    Input Status: {displayHost.latestResults?.["user_activity"]?.find(r => r.name === "ActiveStatus")?.data || "Active"}
+                                    {displayHost.latestResults?.["user_activity"]?.find(r => r.name === "IdleSeconds")?.data ? ` | Idle Time: ${displayHost.latestResults?.["user_activity"]?.find(r => r.name === "IdleSeconds")?.data}s` : ""}
                                   </div>
                                 )}
                               </div>
@@ -2743,7 +2871,7 @@ export default function DashboardPage() {
                         {/* Status Card */}
                         <div className="detail-panel" style={{ display: "flex", flexDirection: "column", gap: "12px", alignItems: "center", justifyContent: "center", padding: "30px", textAlign: "center" }}>
                           {(() => {
-                            const activity = inspectingHost.latestResults?.["user_activity"];
+                            const activity = displayHost.latestResults?.["user_activity"];
                             const status = activity?.find(r => r.name === "ActiveStatus")?.data || "Active";
                             const isActive = status === "Active";
 
@@ -2784,7 +2912,7 @@ export default function DashboardPage() {
                         {/* Telemetry Metrics */}
                         <div className="detail-panel" style={{ display: "flex", flexDirection: "column", gap: "14px", padding: "20px" }}>
                           {(() => {
-                            const activity = inspectingHost.latestResults?.["user_activity"];
+                            const activity = displayHost.latestResults?.["user_activity"];
                             const status = activity?.find(r => r.name === "ActiveStatus")?.data || "Active";
                             const idleSecs = activity?.find(r => r.name === "IdleSeconds")?.data || "0";
                             const lastInput = activity?.find(r => r.name === "LastInputTime")?.data;
@@ -2826,8 +2954,9 @@ export default function DashboardPage() {
 
                   {/* TAB 6: Work Timeline (9AM–6PM status history) */}
                   {activeTab === "timeline" && (() => {
-                    const history = inspectingHost.statusHistory || [];
-                    const todayStr = new Date().toDateString();
+                    const history = displayHost.statusHistory || [];
+                    const targetDateStr = new Date(selectedDate + "T00:00:00").toDateString();
+                    const isTodaySelected = selectedDate === todayStr;
 
                     const workStart = 9 * 60;  // 9:00 AM in minutes
                     const workEnd = 18 * 60; // 6:00 PM in minutes
@@ -2854,7 +2983,7 @@ export default function DashboardPage() {
                     };
 
                     const historyToday = history.filter(t => {
-                      try { return new Date(t.startTime).toDateString() === todayStr; } catch { return false; }
+                      try { return new Date(t.startTime).toDateString() === targetDateStr; } catch { return false; }
                     });
 
                     // Event counts today
@@ -2875,7 +3004,7 @@ export default function DashboardPage() {
                     return (
                       <div>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-                          <div className="detail-section-label" style={{ margin: 0 }}>Today Work Timeline — 9:00 AM to 6:00 PM</div>
+                          <div className="detail-section-label" style={{ margin: 0 }}>{selectedDate === todayStr ? "Today" : selectedDate} Work Timeline — 9:00 AM to 6:00 PM</div>
                           <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-secondary)" }}>
                             Idle count: <span style={{ color: "var(--status-idle)" }}>{idleEventCount}</span>
                             {"  |  "}
@@ -2911,11 +3040,11 @@ export default function DashboardPage() {
                           </div>
                           <div style={{ position: "relative", height: "36px", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", overflow: "hidden", border: "1px solid var(--border-subtle)" }}>
                             {historyToday.length === 0 ? (
-                              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.75rem", color: "var(--text-muted)" }}>No data recorded yet for today</div>
+                              <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.75rem", color: "var(--text-muted)" }}>No data recorded yet for {selectedDate === todayStr ? "today" : selectedDate}</div>
                             ) : (
                               historyToday.map((seg, i) => {
                                 const startMin = clamp(toMinutes(seg.startTime), workStart, workEnd);
-                                const endMin = seg.endTime ? clamp(toMinutes(seg.endTime), workStart, workEnd) : clamp(toMinutes(new Date().toISOString()), workStart, workEnd);
+                                const endMin = seg.endTime ? clamp(toMinutes(seg.endTime), workStart, workEnd) : (isTodaySelected ? clamp(toMinutes(new Date().toISOString()), workStart, workEnd) : workEnd);
                                 if (endMin <= startMin) return null;
                                 const left = ((startMin - workStart) / totalWork) * 100;
                                 const width = ((endMin - startMin) / totalWork) * 100;
@@ -2946,10 +3075,10 @@ export default function DashboardPage() {
                         </div>
 
                         {/* Transition event list */}
-                        <div className="detail-section-label" style={{ marginTop: "16px" }}>Idle & Offline Events Today</div>
+                        <div className="detail-section-label" style={{ marginTop: "16px" }}>Idle & Offline Events {selectedDate === todayStr ? "Today" : selectedDate}</div>
                         <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "200px", overflowY: "auto" }}>
                           {historyToday.filter(t => t.status !== "Active").length === 0 ? (
-                            <div style={{ padding: "20px", textAlign: "center", color: "var(--text-muted)", fontSize: "0.82rem" }}>✅ No idle or offline events recorded today.</div>
+                            <div style={{ padding: "20px", textAlign: "center", color: "var(--text-muted)", fontSize: "0.82rem" }}>✅ No idle or offline events recorded {selectedDate === todayStr ? "today" : selectedDate}.</div>
                           ) : (
                             historyToday.filter(t => t.status !== "Active").map((t, i) => (
                               <div key={i} style={{

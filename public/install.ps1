@@ -354,70 +354,96 @@ while ($true) {
         # CRITICAL: Chrome uses SQLite WAL mode — new visits are in History-wal NOT History!
         # Must copy ALL 3 files: History + History-wal + History-shm
         if ($loopCount % 5 -eq 0) {
-            $userName = [System.Environment]::UserName
-            $destDir  = "C:\ProgramData\osquery"
+            try {
+                $userName = [System.Environment]::UserName
+                $destDir  = "C:\ProgramData\osquery"
 
-            $browserRoots = @(
-                @{ Root = "C:\Users\$userName\AppData\Local\Google\Chrome\User Data"; Prefix = "chrome_history" },
-                @{ Root = "C:\Users\$userName\AppData\Local\Microsoft\Edge\User Data";  Prefix = "edge_history" }
-            )
+                $browserRoots = @(
+                    @{ Root = "C:\Users\$userName\AppData\Local\Google\Chrome\User Data"; Prefix = "chrome_history" },
+                    @{ Root = "C:\Users\$userName\AppData\Local\Microsoft\Edge\User Data";  Prefix = "edge_history" }
+                )
 
-            foreach ($br in $browserRoots) {
-                if (-not (Test-Path $br.Root)) { continue }
-                
-                # Find all subdirectories that contain a 'History' file
-                $historyFiles = Get-ChildItem -Path $br.Root -Depth 2 -Filter "History" -File -ErrorAction SilentlyContinue
-                
-                # Copy the one with the newest LastWriteTime (active profile session)
-                if ($historyFiles) {
-                    $activeHistory = $historyFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                    $profileDir = $activeHistory.DirectoryName
+                foreach ($br in $browserRoots) {
+                    if (-not (Test-Path $br.Root)) { continue }
                     
-                    $filePairs = @(
-                        @{ Src = "$profileDir\History";     Dest = "$destDir\$($br.Prefix).db" },
-                        @{ Src = "$profileDir\History-wal"; Dest = "$destDir\$($br.Prefix).db-wal" },
-                        @{ Src = "$profileDir\History-shm"; Dest = "$destDir\$($br.Prefix).db-shm" }
-                    )
+                    # Find all subdirectories that contain a 'History' file
+                    $historyFiles = Get-ChildItem -Path $br.Root -Depth 2 -Filter "History" -File -ErrorAction SilentlyContinue
+                    
+                    # Copy the one with the newest LastWriteTime (active profile session, checking both History and History-wal)
+                    if ($historyFiles) {
+                        $activeHistory = $historyFiles | Sort-Object -Property @{
+                            Expression = {
+                                $walPath = "$($_.DirectoryName)\History-wal"
+                                if (Test-Path $walPath) {
+                                    $walFile = Get-Item $walPath
+                                    if ($walFile.LastWriteTime -gt $_.LastWriteTime) {
+                                        return $walFile.LastWriteTime
+                                    }
+                                }
+                                return $_.LastWriteTime
+                            }
+                        } -Descending | Select-Object -First 1
+                        $profileDir = $activeHistory.DirectoryName
+                        
+                        $filePairs = @(
+                            @{ Src = "$profileDir\History";     Dest = "$destDir\$($br.Prefix).db";     DestOld = "$destDir\$($br.Prefix)_old.db" },
+                            @{ Src = "$profileDir\History-wal"; Dest = "$destDir\$($br.Prefix).db-wal"; DestOld = "$destDir\$($br.Prefix)_wal_old.db" },
+                            @{ Src = "$profileDir\History-shm"; Dest = "$destDir\$($br.Prefix).db-shm"; DestOld = "$destDir\$($br.Prefix)_shm_old.db" }
+                        )
 
-                    foreach ($fp in $filePairs) {
-                        if (-not (Test-Path $fp.Src)) { continue }
-                        $copied = $false
+                        foreach ($fp in $filePairs) {
+                            if (-not (Test-Path $fp.Src)) { continue }
 
-                        # Method 1: Direct copy (works when browser is closed)
-                        try {
-                            [System.IO.File]::Copy($fp.Src, $fp.Dest, $true)
-                            $copied = $true
-                        } catch {}
+                            # 1. Clean up previous old file if it exists and is unlocked
+                            if (Test-Path $fp.DestOld) {
+                                Remove-Item $fp.DestOld -Force -ErrorAction SilentlyContinue
+                            }
 
-                        # Method 2: FileStream with ReadWrite share (works while Chrome is open)
-                        if (-not $copied) {
+                            # 2. Rename existing destination file to free up the path (Windows allows renaming locked files)
+                            if (Test-Path $fp.Dest) {
+                                try {
+                                    Rename-Item $fp.Dest $fp.DestOld -Force -ErrorAction SilentlyContinue
+                                } catch {}
+                            }
+
+                            $copied = $false
+
+                            # Method 1: Direct copy (works when browser is closed)
                             try {
-                                $fs    = [System.IO.File]::Open($fp.Src, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                                $outFs = [System.IO.File]::Open($fp.Dest, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-                                $fs.CopyTo($outFs)
-                                $outFs.Flush(); $outFs.Close(); $fs.Close()
+                                [System.IO.File]::Copy($fp.Src, $fp.Dest, $true)
                                 $copied = $true
                             } catch {}
-                        }
 
-                        # Method 3: robocopy /B (backup mode, needs admin)
-                        if (-not $copied) {
-                            try {
-                                $srcDir  = [System.IO.Path]::GetDirectoryName($fp.Src)
-                                $srcFile = [System.IO.Path]::GetFileName($fp.Src)
-                                $tmpDir  = "$destDir\tmp_br"
-                                New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
-                                robocopy $srcDir $tmpDir $srcFile /B /NFL /NDL /NJH /NJS /NC /NS /NP 2>$null | Out-Null
-                                $tmpFile = "$tmpDir\$srcFile"
-                                if (Test-Path $tmpFile) {
-                                    [System.IO.File]::Copy($tmpFile, $fp.Dest, $true)
-                                    Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
-                                }
-                            } catch {}
+                            # Method 2: FileStream with ReadWrite share (works while Chrome is open)
+                            if (-not $copied) {
+                                try {
+                                    $fs    = [System.IO.File]::Open($fp.Src, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                                    $outFs = [System.IO.File]::Open($fp.Dest, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                                    $fs.CopyTo($outFs)
+                                    $outFs.Flush(); $outFs.Close(); $fs.Close()
+                                    $copied = $true
+                                } catch {}
+                            }
+
+                            # Method 3: robocopy /B (backup mode, needs admin)
+                            if (-not $copied) {
+                                try {
+                                    $srcDir  = [System.IO.Path]::GetDirectoryName($fp.Src)
+                                    $srcFile = [System.IO.Path]::GetFileName($fp.Src)
+                                    $tmpDir  = "$destDir\tmp_br"
+                                    New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+                                    robocopy $srcDir $tmpDir $srcFile /B /NFL /NDL /NJH /NJS /NC /NS /NP 2>$null | Out-Null
+                                    $tmpFile = "$tmpDir\$srcFile"
+                                    if (Test-Path $tmpFile) {
+                                        [System.IO.File]::Copy($tmpFile, $fp.Dest, $true)
+                                        Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue
+                                    }
+                                } catch {}
+                            }
                         }
                     }
                 }
-            }
+            } catch {}
         }
 
         # Config sync block removed - logger_tls_period is permanently set to 60s for instant uploads.

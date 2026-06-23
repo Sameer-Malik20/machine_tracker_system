@@ -2,6 +2,10 @@
  * WFH Tracker System - Real-time Worker Activity & State Registry
  */
 
+import connectDB from "./db";
+import MachineLog from "./models/MachineLog";
+import mongoose from "mongoose";
+
 export interface StateTransition {
   status: "Active" | "Idle" | "Offline";
   startTime: Date;
@@ -110,6 +114,21 @@ export class ActivityTracker {
     this.updateStatus(newState, "Active");
 
     activityRegistry.set(nodeKey, newState);
+
+    // Asynchronously pre-populate the timeline statusHistory from DB in the background
+    this.loadTodayHistoryFromDB(nodeKey).then(history => {
+      const state = activityRegistry.get(nodeKey);
+      if (state && history && history.length > 0) {
+        state.statusHistory = history;
+        // Set the active state to matches the latest DB entry state if available
+        if (history[0] && history[0].status) {
+          state.status = history[0].status;
+        }
+      }
+    }).catch(err => {
+      console.error(`[ActivityTracker] Background history pre-populate failed for node ${nodeKey}:`, err);
+    });
+
     return newState;
   }
 
@@ -141,6 +160,20 @@ export class ActivityTracker {
         statusHistory: []
       };
       this.updateStatus(state, "Active");
+      activityRegistry.set(nodeKey, state);
+
+      // Asynchronously pre-populate the timeline statusHistory from DB in the background
+      this.loadTodayHistoryFromDB(nodeKey).then(history => {
+        const stateCurrent = activityRegistry.get(nodeKey);
+        if (stateCurrent && history && history.length > 0) {
+          stateCurrent.statusHistory = history;
+          if (history[0] && history[0].status) {
+            stateCurrent.status = history[0].status;
+          }
+        }
+      }).catch(err => {
+        console.error(`[ActivityTracker] Background history pre-populate failed for node ${nodeKey}:`, err);
+      });
     } else {
       // If we already have a state but its hostname is generic and we received a real one, update it
       if (hostIdentifier && hostIdentifier !== "unknown_host" && !hostIdentifier.startsWith("host_")) {
@@ -357,8 +390,19 @@ export class ActivityTracker {
       state.statusHistory = [];
     }
 
-    // Do nothing if state matches and we already have some history
+    // If state matches and we already have some history
     if (state.status === newStatus && state.statusHistory.length > 0) {
+      const latest = state.statusHistory[0];
+      if (latest.endTime) {
+        // If it was closed recently, reopen it (delete endTime and durationSeconds) so it continues in-memory
+        const endTimeDate = typeof latest.endTime === "string" ? new Date(latest.endTime) : latest.endTime;
+        const now = new Date();
+        const gapSeconds = (now.getTime() - endTimeDate.getTime()) / 1000;
+        if (gapSeconds < 300) { // reopen if closed within the last 5 minutes (e.g. server restart transition)
+          delete latest.endTime;
+          delete latest.durationSeconds;
+        }
+      }
       return;
     }
 
@@ -471,5 +515,148 @@ export class ActivityTracker {
     if (p.includes("win") || p.includes("microsoft")) return "windows";
     if (p.includes("darwin") || p.includes("mac") || p.includes("apple")) return "darwin";
     return "unknown";
+  }
+
+  static reconstructStatusHistory(
+    checkins: { timestamp: Date; status: "Active" | "Idle" }[],
+    startOfDay: Date,
+    endOfDay: Date,
+    intervalSecs: number,
+    offlineThreshold: number
+  ): StateTransition[] {
+    const transitions: StateTransition[] = [];
+
+    if (checkins.length === 0) {
+      transitions.push({
+        status: "Offline",
+        startTime: startOfDay,
+        endTime: endOfDay,
+        durationSeconds: Math.floor((endOfDay.getTime() - startOfDay.getTime()) / 1000)
+      });
+      return transitions;
+    }
+
+    if (checkins[0].timestamp.getTime() > startOfDay.getTime()) {
+      transitions.push({
+        status: "Offline",
+        startTime: startOfDay,
+        endTime: checkins[0].timestamp,
+        durationSeconds: Math.floor((checkins[0].timestamp.getTime() - startOfDay.getTime()) / 1000)
+      });
+    }
+
+    for (let i = 0; i < checkins.length; i++) {
+      const current = checkins[i];
+      const next = checkins[i + 1];
+
+      const startTime = current.timestamp;
+      const status = current.status;
+
+      if (next) {
+        const gap = (next.timestamp.getTime() - current.timestamp.getTime()) / 1000;
+        if (gap > offlineThreshold) {
+          const offlineStart = new Date(current.timestamp.getTime() + intervalSecs * 1000);
+
+          transitions.push({
+            status,
+            startTime,
+            endTime: offlineStart,
+            durationSeconds: Math.floor((offlineStart.getTime() - startTime.getTime()) / 1000)
+          });
+
+          transitions.push({
+            status: "Offline",
+            startTime: offlineStart,
+            endTime: next.timestamp,
+            durationSeconds: Math.floor((next.timestamp.getTime() - offlineStart.getTime()) / 1000)
+          });
+        } else {
+          transitions.push({
+            status,
+            startTime,
+            endTime: next.timestamp,
+            durationSeconds: Math.floor((next.timestamp.getTime() - startTime.getTime()) / 1000)
+          });
+        }
+      } else {
+        const limitTime = endOfDay.getTime() < Date.now() ? endOfDay : new Date();
+        const gap = (limitTime.getTime() - current.timestamp.getTime()) / 1000;
+        if (gap > offlineThreshold) {
+          const offlineStart = new Date(current.timestamp.getTime() + intervalSecs * 1000);
+          transitions.push({
+            status,
+            startTime,
+            endTime: offlineStart,
+            durationSeconds: Math.floor((offlineStart.getTime() - startTime.getTime()) / 1000)
+          });
+          transitions.push({
+            status: "Offline",
+            startTime: offlineStart,
+            endTime: limitTime,
+            durationSeconds: Math.floor((limitTime.getTime() - offlineStart.getTime()) / 1000)
+          });
+        } else {
+          transitions.push({
+            status,
+            startTime,
+            endTime: limitTime,
+            durationSeconds: Math.floor((limitTime.getTime() - startTime.getTime()) / 1000)
+          });
+        }
+      }
+    }
+
+    const mergedTransitions: StateTransition[] = [];
+    for (const trans of transitions) {
+      if (mergedTransitions.length === 0) {
+        mergedTransitions.push(trans);
+      } else {
+        const last = mergedTransitions[mergedTransitions.length - 1];
+        if (last.status === trans.status) {
+          last.endTime = trans.endTime;
+          if (last.endTime) {
+            last.durationSeconds = Math.floor((last.endTime.getTime() - last.startTime.getTime()) / 1000);
+          } else {
+            delete last.durationSeconds;
+          }
+        } else {
+          mergedTransitions.push(trans);
+        }
+      }
+    }
+
+    return mergedTransitions.reverse();
+  }
+
+  private static async loadTodayHistoryFromDB(nodeKey: string): Promise<StateTransition[]> {
+    try {
+      await connectDB();
+      const MachineLogModel = mongoose.models.MachineLog || MachineLog;
+      if (!MachineLogModel) return [];
+
+      const now = new Date();
+      // Query the last 36 hours to pre-populate the timeline across timezone boundaries
+      const startOfDay = new Date(now.getTime() - 36 * 60 * 60 * 1000);
+
+      const statusLogs = await MachineLogModel.find({
+        nodeKey,
+        name: "user_activity",
+        "columns.name": "ActiveStatus",
+        timestamp: { $gte: startOfDay, $lte: now }
+      }).sort({ timestamp: 1 });
+
+      if (statusLogs.length === 0) return [];
+
+      const checkins = statusLogs.map(log => ({
+        timestamp: log.timestamp,
+        status: log.columns.data === "Idle" ? ("Idle" as const) : ("Active" as const)
+      }));
+
+      // Reconstruct status transitions history using default activity interval 60s
+      return this.reconstructStatusHistory(checkins, startOfDay, now, 60, 120);
+    } catch (err) {
+      console.error("[ActivityTracker] loadTodayHistoryFromDB error:", err);
+      return [];
+    }
   }
 }
