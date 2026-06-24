@@ -201,7 +201,7 @@ EOF
 echo "  + osquery.flags written"
 
 # Write activity monitor background daemon script
-cat <<'EOF' > "$TargetDir/activity_monitor.sh"
+cat <<'MONITOR_EOF' > "$TargetDir/activity_monitor.sh"
 #!/bin/bash
 # Susalabs WFH Activity Monitor (macOS Version)
 # Background loop running under logged-in GUI session
@@ -436,7 +436,7 @@ EOF
     try_run 2>/dev/null
     sleep 2
 done
-EOF
+MONITOR_EOF
 
 chmod +x "$TargetDir/activity_monitor.sh"
 echo "  + activity_monitor.sh written"
