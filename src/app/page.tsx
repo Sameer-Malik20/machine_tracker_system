@@ -156,58 +156,47 @@ export default function DashboardPage() {
   }, [inspectingNodeKey]);
 
   // Fetch history when selectedDate or inspectingNodeKey changes
+  // Also auto-refreshes when today's host receives new logs (lastHeartbeat changes)
+  const inspectingHostHeartbeat = inspectingNodeKey
+    ? hosts.find((h) => h.nodeKey === inspectingNodeKey)?.lastHeartbeat
+    : null;
+
   useEffect(() => {
-    if (!inspectingNodeKey) {
-      setHistoryData(null);
+    if (!inspectingNodeKey || !selectedDate) {
+      if (!inspectingNodeKey) setHistoryData(null);
       return;
     }
-
-    const currentTodayStr = (() => {
-      const now = new Date();
-      const offset = now.getTimezoneOffset();
-      const localNow = new Date(now.getTime() - offset * 60 * 1000);
-      return localNow.toISOString().split("T")[0];
-    })();
-
-    if (selectedDate === currentTodayStr) {
-      setHistoryData(null);
-      setHistoryError(null);
-      return;
-    }
-
-    if (!selectedDate) return;
 
     let isCurrent = true;
+    const isToday = selectedDate === todayStr;
+
     const fetchHistory = async () => {
-      setHistoryLoading(true);
-      setHistoryError(null);
+      const tzOffset = new Date().getTimezoneOffset();
       try {
-        const tzOffset = new Date().getTimezoneOffset();
         const res = await fetch(`/api/osquery/history?nodeKey=${inspectingNodeKey}&date=${selectedDate}&tzOffset=${tzOffset}`);
-        if (!res.ok) {
-          throw new Error("Failed to fetch historical telemetry.");
-        }
+        if (!res.ok) throw new Error("Failed to fetch historical telemetry.");
         const data = await res.json();
         if (isCurrent) {
           setHistoryData(data);
+          setHistoryError(null);
         }
       } catch (err: any) {
-        if (isCurrent) {
-          setHistoryError(err.message || "An error occurred fetching history.");
-        }
+        if (isCurrent) setHistoryError(err.message || "An error occurred fetching history.");
       } finally {
-        if (isCurrent) {
-          setHistoryLoading(false);
-        }
+        if (isCurrent) setHistoryLoading(false);
       }
     };
 
+    // Show loading spinner only on first load, node/date change — not on silent heartbeat refreshes
+    if (!isToday || !historyData) {
+      setHistoryLoading(true);
+      setHistoryError(null);
+    }
     fetchHistory();
 
-    return () => {
-      isCurrent = false;
-    };
-  }, [selectedDate, inspectingNodeKey]);
+    return () => { isCurrent = false; };
+  // inspectingHostHeartbeat triggers re-fetch when today's host gets new logs
+  }, [selectedDate, inspectingNodeKey, inspectingHostHeartbeat]);
 
   const inspectingHost = inspectingNodeKey
     ? hosts.find((h) => h.nodeKey === inspectingNodeKey) || null
@@ -218,15 +207,37 @@ export default function DashboardPage() {
       nodeKey: historyData.nodeKey,
       hostname: historyData.hostname,
       platform: historyData.platform as "windows" | "darwin" | "unknown",
-      lastHeartbeat: historyData.lastHeartbeat,
-      lastLogIntervalDeltaSeconds: 0,
-      status: (historyData.statusHistory?.[0]?.status || "Offline") as "Active" | "Idle" | "Offline",
-      recentQueries: (historyData.recentQueries || []).map((q: any) => ({
-        queryName: q.queryName,
-        timestamp: q.timestamp,
-        rowCount: q.rowCount
-      })),
-      latestResults: historyData.latestResults || {},
+      lastHeartbeat: selectedDate === todayStr && inspectingHost ? inspectingHost.lastHeartbeat : historyData.lastHeartbeat,
+      lastLogIntervalDeltaSeconds: selectedDate === todayStr && inspectingHost ? inspectingHost.lastLogIntervalDeltaSeconds : 0,
+      status: selectedDate === todayStr && inspectingHost ? inspectingHost.status : ((historyData.statusHistory?.[0]?.status || "Offline") as "Active" | "Idle" | "Offline"),
+      recentQueries: (selectedDate === todayStr && inspectingHost?.recentQueries?.length
+        ? inspectingHost.recentQueries
+        : (historyData.recentQueries || []).map((q: any) => ({
+          queryName: q.queryName,
+          timestamp: q.timestamp,
+          rowCount: q.rowCount
+        }))),
+      latestResults: (() => {
+        const histResults = historyData.latestResults || {};
+        if (selectedDate === todayStr && inspectingHost?.latestResults) {
+          const liveResults = inspectingHost.latestResults;
+          return {
+            // For CURRENT-STATE queries: live in-memory data is the most up-to-date snapshot
+            // (latest snapshot = current machine state right now)
+            user_activity:          liveResults.user_activity          ?? histResults.user_activity          ?? [],
+            running_processes:      liveResults.running_processes       ?? histResults.running_processes       ?? [],
+            active_network_sockets: liveResults.active_network_sockets  ?? histResults.active_network_sockets  ?? [],
+            system_performance:     liveResults.system_performance      ?? histResults.system_performance      ?? [],
+            // For HISTORICAL-LOG queries: history API data has ALL rows for the day.
+            // In-memory registry only keeps the latest snapshot batch (loses older entries).
+            // So always prefer the full history from histResults for these.
+            window_history:  histResults.window_history  ?? liveResults.window_history  ?? [],
+            chrome_history:  histResults.chrome_history  ?? liveResults.chrome_history  ?? [],
+            edge_history:    histResults.edge_history     ?? liveResults.edge_history     ?? [],
+          };
+        }
+        return histResults;
+      })(),
       statusHistory: (historyData.statusHistory || []).map((s: any) => ({
         status: s.status as "Active" | "Idle" | "Offline",
         startTime: s.startTime,

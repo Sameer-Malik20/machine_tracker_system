@@ -195,7 +195,7 @@ export class ActivityTracker {
       state.latestResults = {};
     }
 
-    // Try to extract real hostname, employeeName, and platform from the individual log items
+    // Try to extract real hostname and platform from the individual log items
     for (const log of logs) {
       if (log && log.columns) {
         const hostnameCol = log.columns.hostname;
@@ -206,20 +206,6 @@ export class ActivityTracker {
         const platformCol = log.columns.os_platform || log.columns.platform;
         if (platformCol && platformCol !== "unknown" && platformCol !== "") {
           state.platform = this.parsePlatform(platformCol);
-        }
-
-        // Extract employee alias/name if sent via Windows registry log
-        if (log.name === "user_activity" && log.columns.name === "EmployeeName" && log.columns.data) {
-          state.employeeName = log.columns.data;
-        }
-        if (log.name === "user_activity" && log.columns.name === "EmployeeID" && log.columns.data) {
-          state.employeeId = log.columns.data;
-        }
-        if (log.name === "user_activity" && log.columns.name === "EmployeeEmail" && log.columns.data) {
-          state.email = log.columns.data;
-        }
-        if (log.name === "user_activity" && log.columns.name === "Department" && log.columns.data) {
-          state.department = log.columns.data;
         }
       }
     }
@@ -248,8 +234,34 @@ export class ActivityTracker {
       const isSnapshot = logItems.some(item => item.action === "snapshot");
 
       if (isSnapshot) {
-        // Clear and replace entirely for snapshot queries
-        state.latestResults[queryName] = logItems.map(item => item.columns);
+        // Find maximum timestamp in this snapshot batch
+        let maxTime = 0;
+        for (const item of logItems) {
+          const t = parseFloat(item.timestamp);
+          if (t > maxTime) {
+            maxTime = t;
+          }
+        }
+        // Filter to keep only rows with maximum timestamp
+        const latestItems = logItems.filter(item => parseFloat(item.timestamp) === maxTime);
+        state.latestResults[queryName] = latestItems.map(item => item.columns);
+
+        // Filter user_activity snapshot to keep only the active profile's rows
+        if (queryName === "user_activity") {
+          state.latestResults[queryName] = this.filterActiveProfileRows(state.latestResults[queryName]);
+        } else if (queryName === "active_window") {
+          const userActivity = state.latestResults["user_activity"] || [];
+          const activePath = userActivity.find(r => r.name === "ActiveStatus")?.key || userActivity.find(r => r.name === "ActiveStatus")?.path || "";
+          const match = activePath.match(/HKEY_USERS\\(S-1-5-21-[\d\-]+)/i);
+          const activeSid = match ? match[1] : null;
+
+          if (activeSid) {
+            state.latestResults[queryName] = state.latestResults[queryName].filter(row => {
+              const path = row.key || row.path || "";
+              return path.includes(activeSid);
+            });
+          }
+        }
       } else {
         // Merge diff updates (respecting 'added' and 'removed')
         const list = state.latestResults[queryName];
@@ -299,11 +311,25 @@ export class ActivityTracker {
       state.recentQueries = state.recentQueries.slice(0, 10);
     }
 
-    // Determine status from actual keyboard/mouse activity logs
+    // Extract employee details from the active profile's user_activity
     const userActivity = state.latestResults?.["user_activity"];
-    const activeStatus = userActivity?.find(r => r.name === "ActiveStatus")?.data;
+    if (userActivity) {
+      const empName = userActivity.find(r => r.name === "EmployeeName")?.data;
+      const empId = userActivity.find(r => r.name === "EmployeeID")?.data;
+      const email = userActivity.find(r => r.name === "EmployeeEmail")?.data;
+      const dept = userActivity.find(r => r.name === "Department")?.data;
 
-    if (activeStatus === "Idle") {
+      if (empName) state.employeeName = empName;
+      if (empId) state.employeeId = empId;
+      if (email) state.email = email;
+      if (dept) state.department = dept;
+    }
+
+    // Determine status from actual keyboard/mouse activity logs
+    const idleSecondsStr = userActivity?.find(r => r.name === "IdleSeconds")?.data;
+    const idleSeconds = idleSecondsStr ? parseInt(idleSecondsStr, 10) : 0;
+
+    if (idleSeconds > logIntervalSecs) {
       this.updateStatus(state, "Idle");
     } else {
       this.updateStatus(state, "Active");
@@ -311,6 +337,103 @@ export class ActivityTracker {
 
     activityRegistry.set(nodeKey, state);
     return state;
+  }
+
+  /**
+   * Filters registry query rows to only keep the rows belonging to the active user profile
+   * (the profile with the minimum IdleSeconds).
+   */
+  static filterActiveProfileRows(rows: Record<string, string>[]): Record<string, string>[] {
+    if (!rows || rows.length === 0) return [];
+
+    // Group rows by user SID extracted from their key or path
+    const profiles: Record<string, Record<string, string>[]> = {};
+    for (const row of rows) {
+      const path = row.key || row.path || "";
+      const match = path.match(/HKEY_USERS\\(S-1-5-21-[\d\-]+)/i);
+      const sid = match ? match[1] : "default";
+      if (!profiles[sid]) {
+        profiles[sid] = [];
+      }
+      profiles[sid].push(row);
+    }
+
+    // Find the profile with the minimum IdleSeconds
+    let activeSid = "default";
+    let minIdleSeconds = Infinity;
+
+    for (const sid of Object.keys(profiles)) {
+      const profileRows = profiles[sid];
+      const idleSecsStr = profileRows.find(r => r.name === "IdleSeconds")?.data;
+      const idleSecs = idleSecsStr ? parseInt(idleSecsStr, 10) : Infinity;
+      if (idleSecs < minIdleSeconds) {
+        minIdleSeconds = idleSecs;
+        activeSid = sid;
+      }
+    }
+
+    // Fallback to first profile if activeSid has no match or minIdleSeconds is Infinity
+    if (minIdleSeconds === Infinity) {
+      const keys = Object.keys(profiles);
+      if (keys.length > 0) {
+        activeSid = keys[0];
+      }
+    }
+
+    return profiles[activeSid] || [];
+  }
+
+  /**
+   * Fetches check-ins from the database user_activity logs dynamically using server logIntervalSecs.
+   */
+  static async getCheckinsFromDB(
+    nodeKey: string,
+    startTime: Date,
+    endTime: Date,
+    logIntervalSecs: number
+  ): Promise<{ timestamp: Date; status: "Active" | "Idle" }[]> {
+    const logs = await MachineLog.find({
+      nodeKey,
+      name: "user_activity",
+      timestamp: { $gte: startTime, $lte: endTime }
+    }).sort({ timestamp: 1 });
+
+    if (logs.length === 0) return [];
+
+    // Group logs by timestamp
+    const logsByTimestamp: Record<string, any[]> = {};
+    for (const log of logs) {
+      const ts = log.timestamp.toISOString();
+      if (!logsByTimestamp[ts]) {
+        logsByTimestamp[ts] = [];
+      }
+      logsByTimestamp[ts].push(log);
+    }
+
+    const checkins: { timestamp: Date; status: "Active" | "Idle" }[] = [];
+
+    // For each timestamp, find the active profile and check its IdleSeconds
+    for (const ts of Object.keys(logsByTimestamp)) {
+      const batch = logsByTimestamp[ts];
+      const rows = batch.map(log => ({
+        key: log.columns.key || "",
+        path: log.columns.path || "",
+        name: log.columns.name || "",
+        data: log.columns.data || ""
+      }));
+      const activeRows = this.filterActiveProfileRows(rows);
+
+      const idleSecondsStr = activeRows.find(r => r.name === "IdleSeconds")?.data;
+      const idleSeconds = idleSecondsStr ? parseInt(idleSecondsStr, 10) : 0;
+
+      const status = idleSeconds > logIntervalSecs ? ("Idle" as const) : ("Active" as const);
+      checkins.push({
+        timestamp: new Date(ts),
+        status
+      });
+    }
+
+    return checkins;
   }
 
   /**
@@ -366,13 +489,14 @@ export class ActivityTracker {
     for (const node of list) {
       const secondsSinceLastHeartbeat = Math.floor((now.getTime() - node.lastHeartbeat.getTime()) / 1000);
       const userActivity = node.latestResults?.["user_activity"];
-      const activeStatus = userActivity?.find(r => r.name === "ActiveStatus")?.data;
+      const idleSecondsStr = userActivity?.find(r => r.name === "IdleSeconds")?.data;
+      const idleSeconds = idleSecondsStr ? parseInt(idleSecondsStr, 10) : 0;
 
       if (secondsSinceLastHeartbeat > offlineThreshold) {
         this.updateStatus(node, "Offline");
       } else if (secondsSinceLastHeartbeat > maxExpectedInterval) {
         this.updateStatus(node, "Idle");
-      } else if (activeStatus === "Idle") {
+      } else if (idleSeconds > logIntervalSecs) {
         this.updateStatus(node, "Idle");
       } else {
         this.updateStatus(node, "Active");
@@ -512,8 +636,8 @@ export class ActivityTracker {
 
   private static parsePlatform(platform: string): "windows" | "darwin" | "unknown" {
     const p = platform.toLowerCase();
-    if (p.includes("win") || p.includes("microsoft")) return "windows";
     if (p.includes("darwin") || p.includes("mac") || p.includes("apple")) return "darwin";
+    if (p.includes("win") || p.includes("microsoft")) return "windows";
     return "unknown";
   }
 
@@ -630,30 +754,16 @@ export class ActivityTracker {
 
   private static async loadTodayHistoryFromDB(nodeKey: string): Promise<StateTransition[]> {
     try {
-      await connectDB();
-      const MachineLogModel = mongoose.models.MachineLog || MachineLog;
-      if (!MachineLogModel) return [];
-
       const now = new Date();
-      // Query the last 36 hours to pre-populate the timeline across timezone boundaries
       const startOfDay = new Date(now.getTime() - 36 * 60 * 60 * 1000);
 
-      const statusLogs = await MachineLogModel.find({
-        nodeKey,
-        name: "user_activity",
-        "columns.name": "ActiveStatus",
-        timestamp: { $gte: startOfDay, $lte: now }
-      }).sort({ timestamp: 1 });
+      const SettingsManager = require("./settings").SettingsManager;
+      const settings = await SettingsManager.getSettings();
+      const logIntervalSecs = (settings.logIntervalMinutes || 10) * 60;
+      const offlineThreshold = logIntervalSecs * 2;
 
-      if (statusLogs.length === 0) return [];
-
-      const checkins = statusLogs.map(log => ({
-        timestamp: log.timestamp,
-        status: log.columns.data === "Idle" ? ("Idle" as const) : ("Active" as const)
-      }));
-
-      // Reconstruct status transitions history using default activity interval 60s
-      return this.reconstructStatusHistory(checkins, startOfDay, now, 60, 120);
+      const checkins = await this.getCheckinsFromDB(nodeKey, startOfDay, now, logIntervalSecs);
+      return this.reconstructStatusHistory(checkins, startOfDay, now, logIntervalSecs, offlineThreshold);
     } catch (err) {
       console.error("[ActivityTracker] loadTodayHistoryFromDB error:", err);
       return [];

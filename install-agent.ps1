@@ -43,9 +43,9 @@ if (-not $ServerAddress) {
     Write-Host "  [STEP 1/5] Server Configuration" -ForegroundColor Yellow
     Write-Host "  Enter the Susalabs WFH Tracker server address." -ForegroundColor White
     Write-Host "  Example: yourserver.com  OR  192.168.1.100:3001" -ForegroundColor Gray
-    Write-Host "  (Press Enter to use default: localhost:3001)" -ForegroundColor Gray
+    Write-Host "  (Press Enter to use default: tracker.susalabs.in)" -ForegroundColor Gray
     $ServerAddress = Read-Host "  Server Address"
-    if (-not $ServerAddress) { $ServerAddress = "localhost:3001" }
+    if (-not $ServerAddress) { $ServerAddress = "tracker.susalabs.in" }
 }
 Write-Host "  + Server: $ServerAddress" -ForegroundColor Green
 

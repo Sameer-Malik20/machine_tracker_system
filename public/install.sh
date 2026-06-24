@@ -1,9 +1,9 @@
 #!/bin/bash
 # ==============================================================================
 # Susalabs WFH Tracker - Complete macOS Agent Installer
-# install-agent.sh
+# install.sh
 #
-# Run this script with sudo: sudo ./install-agent.sh
+# Run this script with sudo: sudo ./install.sh
 # This script will automatically:
 #   1. Create osquery directories and configuration files
 #   2. Create employee.json configuration
@@ -16,7 +16,7 @@
 if [ "$(id -u)" -ne 0 ]; then
     echo ""
     echo "  \033[0;31m[ERROR] Please run this script with sudo/root privileges.\033[0m"
-    echo "  Run: sudo ./install-agent.sh"
+    echo "  Run: sudo ./install.sh"
     echo ""
     exit 1
 fi

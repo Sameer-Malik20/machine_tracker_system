@@ -51,8 +51,7 @@ export async function GET(req: NextRequest) {
     const endOfDay = new Date(new Date(`${dateStr}T23:59:59.999Z`).getTime() + tzOffset * 60 * 1000);
 
     const settings = await SettingsManager.getSettings();
-    const platformSettings = node.platform === "darwin" ? settings.mac : settings.windows;
-    const intervalSecs = platformSettings.activityInterval || 60;
+    const intervalSecs = (settings.logIntervalMinutes || 10) * 60;
     const offlineThreshold = Math.max(120, intervalSecs * 2.0);
 
     // Fetch system info / specs for that day (latest before or on that day)
@@ -221,7 +220,7 @@ export async function GET(req: NextRequest) {
         name: "user_activity",
         timestamp: latestUserActivityLog.timestamp
       });
-      userActivity = activityRows.map(r => r.columns);
+      userActivity = ActivityTracker.filterActiveProfileRows(activityRows.map(r => r.columns));
     }
 
     // Fetch check-in logs (recentQueries) for that day
@@ -236,18 +235,8 @@ export async function GET(req: NextRequest) {
       rowCount: 1 // fallback count
     }));
 
-    // Reconstruct status transitions history for the work timeline
-    const statusLogs = await MachineLog.find({
-      nodeKey,
-      name: "user_activity",
-      "columns.name": "ActiveStatus",
-      timestamp: { $gte: startOfDay, $lte: endOfDay }
-    }).sort({ timestamp: 1 });
-
-    const checkins = statusLogs.map(log => ({
-      timestamp: log.timestamp,
-      status: log.columns.data === "Idle" ? "Idle" as const : "Active" as const
-    }));
+    // Reconstruct status transitions history for the work timeline dynamically
+    const checkins = await ActivityTracker.getCheckinsFromDB(nodeKey, startOfDay, endOfDay, intervalSecs);
 
     const statusHistory = ActivityTracker.reconstructStatusHistory(
       checkins,

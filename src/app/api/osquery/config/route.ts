@@ -95,18 +95,20 @@ export async function POST(req: NextRequest) {
 
     // Fetch dynamic admin-configured settings
     const settings = await SettingsManager.getSettings();
-    const platformSettings = platform === "darwin" ? settings.mac : settings.windows;
+    const intervalSecs = (settings.logIntervalMinutes || 10) * 60;
 
-    const processInterval = platformSettings.processInterval || 60;
-    const performanceInterval = platformSettings.performanceInterval || 60;
-    const networkInterval = platformSettings.networkInterval || 60;
-    const activityInterval = platformSettings.activityInterval || 60;
+    const processInterval = intervalSecs;
+    const performanceInterval = intervalSecs;
+    const networkInterval = intervalSecs;
+    const activityInterval = intervalSecs;
+
+    const isMac = platform === "darwin";
 
     // Return the scheduled queries configuration (Osquery packs structure)
     const configResponse = {
       options: {
         config_tls_refresh: 60,
-        logger_tls_period: 60,
+        logger_tls_period: intervalSecs,
       },
       schedule: {
         running_processes: {
@@ -127,10 +129,14 @@ export async function POST(req: NextRequest) {
           description: "Collects active network sockets (established and listening ports) on the system."
         },
         user_activity: {
-          query: "SELECT name, data FROM registry WHERE path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveStatus' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\IdleSeconds' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\LastInputTime' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeName' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeID' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\EmployeeEmail' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\Department';",
+          query: isMac
+            ? "SELECT key AS name, value AS data FROM plist WHERE path = '/var/osquery/activity.plist';"
+            : "SELECT key, name, data FROM registry WHERE key LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity';",
           interval: activityInterval,
           snapshot: true,
-          description: "Tracks active user keyboard and mouse interaction telemetry from the Windows Registry."
+          description: isMac
+            ? "Tracks active user keyboard and mouse interaction telemetry from plist."
+            : "Tracks active user keyboard and mouse interaction telemetry from the Windows Registry."
         },
         chrome_history: {
           // Uses the ATC virtual table 'chrome_history_atc' defined below
@@ -147,13 +153,17 @@ export async function POST(req: NextRequest) {
           description: "Retrieves Edge browser history from the copied SQLite database via ATC."
         },
         window_history: {
-          query: "SELECT name as timestamp, data as details FROM registry WHERE key LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\WindowHistory';",
+          query: isMac
+            ? "SELECT key AS timestamp, value AS details FROM plist WHERE path = '/var/osquery/window_history.plist';"
+            : "SELECT name as timestamp, data as details FROM registry WHERE key LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\WindowHistory';",
           interval: activityInterval,
           snapshot: true,
           description: "Tracks active window foreground changes over time."
         },
         active_window: {
-          query: "SELECT name, data FROM registry WHERE path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveStatus' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\IdleSeconds' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\LastInputTime' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveWindowTitle' OR path LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity\\ActiveWindowUrl';",
+          query: isMac
+            ? "SELECT key AS name, value AS data FROM plist WHERE path = '/var/osquery/activity.plist';"
+            : "SELECT key, name, data FROM registry WHERE key LIKE 'HKEY_USERS\\S-1-5-21-%\\Software\\Monetra\\Activity';",
           interval: activityInterval,
           snapshot: true,
           description: "High-frequency poll of user active/idle status and current window URL."
@@ -165,12 +175,12 @@ export async function POST(req: NextRequest) {
       auto_table_construction: {
         chrome_history_atc: {
           query: "SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT 50",
-          path: "C:\\ProgramData\\osquery\\chrome_history.db",
+          path: isMac ? "/var/osquery/chrome_history.db" : "C:\\ProgramData\\osquery\\chrome_history.db",
           columns: ["url", "title", "last_visit_time"]
         },
         edge_history_atc: {
           query: "SELECT url, title, last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT 50",
-          path: "C:\\ProgramData\\osquery\\edge_history.db",
+          path: isMac ? "/var/osquery/edge_history.db" : "C:\\ProgramData\\osquery\\edge_history.db",
           columns: ["url", "title", "last_visit_time"]
         }
       },

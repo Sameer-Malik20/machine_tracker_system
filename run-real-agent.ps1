@@ -17,10 +17,10 @@ $OsqueryDaemon = "C:\Program Files\osquery\osqueryd\osqueryd.exe"
 # Ask for the server IP / Address so it can be distributed easily to other machines
 Write-Host "--------------------------------------------------------" -ForegroundColor Cyan
 Write-Host "Enter the central server address (IP:Port or Domain:Port)"
-Write-Host "If running on the same machine as the server, just press Enter for 'localhost:3001'"
+Write-Host "If running on the same machine as the server, just press Enter for 'tracker.susalabs.in'"
 $ServerAddress = Read-Host "Server Address"
 if (-not $ServerAddress) {
-    $ServerAddress = "localhost:3001"
+    $ServerAddress = "tracker.susalabs.in"
 }
 Write-Host "Connecting to: $ServerAddress" -ForegroundColor Green
 Write-Host "--------------------------------------------------------" -ForegroundColor Cyan

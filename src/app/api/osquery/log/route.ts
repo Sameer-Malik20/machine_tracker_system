@@ -83,7 +83,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Payload too large", node_invalid: false }, { status: 400 });
     }
 
+    try {
+      const fs = require("fs");
+      const path = require("path");
+      fs.writeFileSync(
+        "/root/machine_tracker/scratch/raw_logs.json",
+        JSON.stringify({ nodeKey, logs }, null, 2)
+      );
+    } catch (_) {}
+
     // Perform strict type and value checks on each log entry (data validation layer)
+    const requestTimeSecs = String(Date.now() / 1000);
     const validLogs: OsqueryLogEntry[] = [];
     for (const entry of logs) {
       if (entry && typeof entry === "object" && typeof entry.name === "string") {
@@ -101,7 +111,7 @@ export async function POST(req: NextRequest) {
                 name: entry.name.trim(),
                 action: "snapshot",
                 columns: sanitizedColumns,
-                timestamp: typeof entry.timestamp === "string" ? entry.timestamp : String(Date.now() / 1000)
+                timestamp: typeof entry.timestamp === "string" ? entry.timestamp : requestTimeSecs
               });
             }
           }
@@ -120,7 +130,7 @@ export async function POST(req: NextRequest) {
             name: entry.name.trim(),
             action: entry.action,
             columns: sanitizedColumns,
-            timestamp: typeof entry.timestamp === "string" ? entry.timestamp : String(Date.now() / 1000)
+            timestamp: typeof entry.timestamp === "string" ? entry.timestamp : requestTimeSecs
           });
         }
       }
@@ -211,22 +221,7 @@ Completeness Assessment: ${completeness}
       const queryName = entry.name;
       const entryTimeMs = getEntryTimeMs(entry);
 
-      let queryInterval = (settings.logIntervalMinutes || 10) * 60; // fallback
-      if (queryName === "running_processes") {
-        queryInterval = platformSettings.processInterval || 60;
-      } else if (queryName === "system_performance") {
-        queryInterval = platformSettings.performanceInterval || 60;
-      } else if (queryName === "active_network_sockets") {
-        queryInterval = platformSettings.networkInterval || 60;
-      } else if (
-        queryName === "user_activity" ||
-        queryName === "active_window" ||
-        queryName === "window_history" ||
-        queryName === "chrome_history" ||
-        queryName === "edge_history"
-      ) {
-        queryInterval = platformSettings.activityInterval || 60;
-      }
+      const queryInterval = (settings.logIntervalMinutes || 10) * 60;
 
       const lastSaveDate = hostState?.lastQuerySaveTimes?.[queryName];
       let shouldRateLimitQuery = false;
@@ -259,7 +254,7 @@ Completeness Assessment: ${completeness}
       console.log(`[API - Log] Rate-limiting DB save: dropped ${rateLimitedCount} rows for queries that arrived too early.`);
     }
 
-    const processedState = ActivityTracker.processLogCheckinWithLogs(nodeKey, logsToSave, hostIdentifier, intervalSecs);
+    const processedState = ActivityTracker.processLogCheckinWithLogs(nodeKey, validLogs, hostIdentifier, intervalSecs);
 
     if (processedState) {
       processedState.latestCheckinDebug = {
